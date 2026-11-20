@@ -69,6 +69,21 @@ jobs:
               exit 1
             }
 
+      # デバッグ版は、モジュール側の debug ブランチを見る（本番は上の main のまま）
+      - name: デバッグ用にモジュールをdebugブランチへ差し替える
+        run: |
+          rm -rf vendor/duo-remote vendor/DuoFlick
+      - uses: actions/checkout@v4
+        with:
+          repository: nexon1101-pixel/duo-remote
+          ref: debug
+          path: vendor/duo-remote
+      - uses: actions/checkout@v4
+        with:
+          repository: nexon1101-pixel/DuoFlick
+          ref: debug
+          path: vendor/DuoFlick
+
       - name: デバッグ版をビルドする
         working-directory: ios
         run: |
