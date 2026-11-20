@@ -1,8 +1,8 @@
 import DuoRemoteCore
 import SwiftUI
 
-/// 採用箱の入り口。ホームにモジュールのアイコンが並び、選んだ機能の画面へ入る。
-/// 機能を増やすときは、ここにタイルと画面を足す。
+/// DuoBox の入り口。ホームにモジュールが並び、選んだ機能の画面へ入る。
+/// 機能を増やすときは、ここにカードと画面を足す。
 struct RootView: View {
     @EnvironmentObject private var session: RemoteSession
     @State private var screen: Screen = .home
@@ -45,43 +45,123 @@ struct RootView: View {
     }
 }
 
+/// 画面全体の背景。アイコンと同じ、濃い紺にシアンと紫の光がにじむ感じ。
+private struct BoxBackground: View {
+    var body: some View {
+        ZStack {
+            Color(red: 0.02, green: 0.03, blue: 0.07)
+            RadialGradient(
+                colors: [Color.cyan.opacity(0.20), .clear],
+                center: .topLeading, startRadius: 0, endRadius: 420
+            )
+            RadialGradient(
+                colors: [Color.purple.opacity(0.22), .clear],
+                center: .bottomTrailing, startRadius: 0, endRadius: 460
+            )
+        }
+        .ignoresSafeArea()
+    }
+}
+
+/// 見出しのワードマーク。
+private struct Wordmark: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("DuoBox")
+                .font(.system(size: 36, weight: .bold, design: .rounded))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.cyan, Color(red: 0.55, green: 0.45, blue: 1.0)],
+                        startPoint: .leading, endPoint: .trailing
+                    )
+                )
+            Text("LAUNCHER")
+                .font(.caption.weight(.semibold))
+                .tracking(4)
+                .foregroundStyle(.white.opacity(0.45))
+        }
+    }
+}
+
 private struct HomeView: View {
     var onOpen: (RootView.Screen) -> Void
 
-    private let columns = [GridItem(.adaptive(minimum: 96), spacing: 20)]
-
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            BoxBackground()
             ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    Text("採用箱")
-                        .font(.largeTitle.weight(.bold))
-                        .foregroundStyle(.white)
-                        .padding(.top, 32)
+                VStack(alignment: .leading, spacing: 30) {
+                    Wordmark()
+                        .padding(.top, 40)
 
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
-                        tile(title: "リモート", systemImage: "display") { onOpen(.remote) }
-                        tile(title: "キーボード", systemImage: "keyboard") { onOpen(.keyboard) }
+                    VStack(spacing: 14) {
+                        moduleCard(
+                            title: "リモート",
+                            detail: "PCの画面を見て、操作する",
+                            systemImage: "display",
+                            colors: [.cyan, .blue]
+                        ) { onOpen(.remote) }
+                        moduleCard(
+                            title: "キーボード",
+                            detail: "DuoFlick を追加して使う",
+                            systemImage: "keyboard",
+                            colors: [.purple, Color(red: 0.85, green: 0.35, blue: 1.0)]
+                        ) { onOpen(.keyboard) }
                     }
+
+                    Spacer(minLength: 12)
+
+                    Text(versionText)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.35))
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
                 .padding(.horizontal, 24)
+                .padding(.bottom, 24)
             }
         }
     }
 
-    private func tile(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+    private var versionText: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? ""
+        return "DuoBox \(version)"
+    }
+
+    private func moduleCard(title: String, detail: String, systemImage: String,
+                            colors: [Color], action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 10) {
+            HStack(spacing: 16) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 30))
-                    .frame(width: 68, height: 68)
-                    .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                Text(title)
-                    .font(.callout)
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(width: 54, height: 54)
+                    .background(
+                        LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing),
+                        in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    )
+                    .shadow(color: colors.first!.opacity(0.45), radius: 10, y: 4)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.35))
             }
-            .foregroundStyle(.white)
+            .padding(18)
+            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
+            )
         }
+        .buttonStyle(.plain)
     }
 }
 
@@ -89,18 +169,31 @@ private struct HomeView: View {
 private struct KeyboardInfoView: View {
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            BoxBackground()
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    Text("キーボード（DuoFlick）")
-                        .font(.title2.weight(.bold))
-                        .foregroundStyle(.white)
-                        .padding(.top, 56)
+                    HStack(spacing: 14) {
+                        Image(systemName: "keyboard")
+                            .font(.system(size: 22, weight: .medium))
+                            .foregroundStyle(.white)
+                            .frame(width: 48, height: 48)
+                            .background(
+                                LinearGradient(
+                                    colors: [.purple, Color(red: 0.85, green: 0.35, blue: 1.0)],
+                                    startPoint: .topLeading, endPoint: .bottomTrailing
+                                ),
+                                in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            )
+                        Text("キーボード")
+                            .font(.title2.weight(.bold))
+                            .foregroundStyle(.white)
+                    }
+                    .padding(.top, 56)
 
                     Text("このアプリに、DuoFlick のキーボードが入っています。使うには、iPhone の設定でキーボードを追加してください。")
                         .foregroundStyle(.white.opacity(0.85))
 
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 12) {
                         step("1", "設定アプリを開く")
                         step("2", "一般 → キーボード → キーボード の順に進む")
                         step("3", "「新しいキーボードを追加」から DuoFlick を選ぶ")
@@ -116,11 +209,17 @@ private struct KeyboardInfoView: View {
                         }
                     } label: {
                         Text("設定アプリを開く")
-                            .font(.callout.weight(.medium))
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .background(.ultraThinMaterial, in: Capsule())
+                            .font(.callout.weight(.semibold))
                             .foregroundStyle(.white)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 12)
+                            .background(
+                                LinearGradient(
+                                    colors: [.purple, Color(red: 0.85, green: 0.35, blue: 1.0)],
+                                    startPoint: .leading, endPoint: .trailing
+                                ),
+                                in: Capsule()
+                            )
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -131,11 +230,18 @@ private struct KeyboardInfoView: View {
     }
 
     private func step(_ number: String, _ text: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 12) {
             Text(number)
                 .font(.callout.weight(.bold))
-                .frame(width: 24, height: 24)
-                .background(Color.white.opacity(0.15), in: Circle())
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(
+                    LinearGradient(
+                        colors: [Color.purple.opacity(0.8), Color(red: 0.85, green: 0.35, blue: 1.0).opacity(0.8)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    ),
+                    in: Circle()
+                )
             Text(text)
                 .foregroundStyle(.white.opacity(0.9))
         }
