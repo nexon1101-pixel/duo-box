@@ -1,0 +1,220 @@
+name: Android runtime
+
+# 段2：Kernarium の依存プレフィックス → ランタイム → XCFramework → システムイメージ のビルド。
+# 段1（取得＋照合）を先に行い、その上でビルドする。ipa はまだ作らない。
+# 初回は数時間級の可能性がある（Mesa/KosmicKrisp など）。2回目以降はキャッシュを使う。
+on:
+  push:
+    branches: [feat/android]
+    paths:
+      - "ios/kernarium.pin"
+      - "scripts/ci/**"
+      - ".github/workflows/android-runtime.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TIMINGS_FILE: ${{ github.workspace }}/.timings.tsv
+
+jobs:
+  runtime:
+    runs-on: xcode-27
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ピンを読む
+        id: pin
+        run: |
+          ref=$(grep -E '^KERNARIUM_REF=' ios/kernarium.pin | head -n1 | cut -d= -f2)
+          tag=$(grep -E '^KERNARIUM_RELEASE_TAG=' ios/kernarium.pin | head -n1 | cut -d= -f2)
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::KERNARIUM_REF が不正です"; exit 1; }
+          [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::KERNARIUM_RELEASE_TAG が不正です"; exit 1; }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # キャッシュキーの形式を変えたいとき（作り直したいとき）は v1 を上げる
+          echo "key=${ref}-${tag}-v1" >> "$GITHUB_OUTPUT"
+
+      - name: Xcodeを選ぶ（入っている中でいちばん新しいもの）
+        run: |
+          best=$(ls -d /Applications/Xcode_[0-9]*.app | sort -V | tail -1)
+          test -n "$best" || { echo "::error::Xcode が見つかりません"; exit 1; }
+          echo "using $best"
+          sudo xcode-select -s "$best/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i ios
+
+      - name: ビルド道具を入れる（本元 dependencies/README.md の前提）
+        run: |
+          scripts/ci/timed.sh "道具の導入" bash -c '
+            set -e
+            # 本元が要求するもの：CMake 3.27+, Ninja, GNU Make, Meson, Python 3.11+, pkg-config,
+            # rsync, Autoconf, Automake, gettext, libtool, gperf, groff, bison, flex
+            brew update
+            brew install cmake ninja make meson pkg-config rsync autoconf automake gettext libtool gperf groff bison flex gh python@3.12
+            brew link --force gettext || true
+          '
+          # 新しい Python / bison を先に使う（macOS 標準の python3 は 3.9、bison は 2.3）
+          PY_BIN="$(brew --prefix python@3.12)/libexec/bin"
+          echo "$PY_BIN" >> "$GITHUB_PATH"
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix gettext)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: 道具のバージョン確認
+        run: |
+          python3 --version
+          cmake --version | head -n1
+          meson --version
+          ninja --version
+          bison --version | head -n1
+          # git の identity（本元の一部ツールが fixture をコミットする）
+          git config --global user.name "ci"
+          git config --global user.email "ci@users.noreply.github.com"
+
+      # 段1：取得＋照合（vendor/kernarium を作り直すので、キャッシュの復元より先に行う）
+      - name: Kernarium 取得 + 成果物の照合（段1）
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/ci/timed.sh "段1 取得と照合" bash scripts/ci/fetch-kernarium.sh
+
+      - name: Python venv（meson, mako, pyyaml, packaging）
+        # 本元は .build/gpu-tools-venv の bin/meson を優先して使う。取得で vendor が作り直されるので、取得のあとに作る
+        working-directory: vendor/kernarium
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci/timed.sh" "venv 作成" bash -c '
+            set -e
+            python3 -m venv .build/gpu-tools-venv
+            .build/gpu-tools-venv/bin/pip install --quiet meson mako pyyaml packaging
+            .build/gpu-tools-venv/bin/meson --version
+          '
+
+      - name: Metal Toolchain を入れる
+        run: |
+          scripts/ci/timed.sh "Metal Toolchain" bash -c '
+            if xcrun metal --version >/dev/null 2>&1; then
+              echo "Metal Toolchain は導入済み"
+            else
+              xcodebuild -downloadComponent MetalToolchain
+            fi
+            xcrun metal --version
+          '
+
+      # ---- キャッシュ：依存プレフィックス ----
+      - name: キャッシュ復元（依存プレフィックス）
+        id: cache-deps
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            vendor/kernarium/.build/dependencies
+            vendor/kernarium/.build/dependency-cache
+            vendor/kernarium/external/sources
+          key: kernarium-deps-${{ runner.os }}-${{ steps.pin.outputs.key }}
+
+      - name: 依存ソースを用意（prepare.sh、ネットワークを使うのはここだけ）
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        working-directory: vendor/kernarium
+        run: |
+          for p in apple-gpu-vulkan-experiment ios-network ios-storage ios-compression; do
+            "$GITHUB_WORKSPACE/scripts/ci/timed.sh" "prepare $p" dependencies/prepare.sh --product "$p"
+          done
+
+      - name: 依存をビルド（iOS 実機向け）
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        working-directory: vendor/kernarium
+        run: |
+          T="$GITHUB_WORKSPACE/scripts/ci/timed.sh"
+          "$T" "build GPU (Mesa/KosmicKrisp, ios)" dependencies/build-apple-gpu.sh --platform ios
+          "$T" "build network (ios)" dependencies/build-ios-network.sh --platform ios
+          "$T" "build storage (GPTFDisk)" dependencies/build-ios-storage.sh
+          "$T" "build zstd" dependencies/build-ios-zstd.sh
+
+      - name: キャッシュ保存（依存プレフィックス）
+        # 後ろのステップが失敗しても、重い依存ビルドの結果は残す
+        if: always() && steps.cache-deps.outputs.cache-hit != 'true' && hashFiles('vendor/kernarium/.build/dependencies/ios-zstd/**') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            vendor/kernarium/.build/dependencies
+            vendor/kernarium/.build/dependency-cache
+            vendor/kernarium/external/sources
+          key: kernarium-deps-${{ runner.os }}-${{ steps.pin.outputs.key }}
+
+      - name: 依存プレフィックスの照合（キャッシュを使った場合）
+        if: steps.cache-deps.outputs.cache-hit == 'true'
+        working-directory: vendor/kernarium
+        run: |
+          T="$GITHUB_WORKSPACE/scripts/ci/timed.sh"
+          "$T" "verify GPU prefix" dependencies/build-apple-gpu.sh --platform ios --verify-only
+          "$T" "verify network prefix" dependencies/build-ios-network.sh --platform ios --verify-only
+
+      # ---- ランタイム ----
+      - name: キャッシュ復元（ランタイムのビルドツリー）
+        id: cache-runtime
+        uses: actions/cache/restore@v4
+        with:
+          path: vendor/kernarium/.build/kernarium-runtime-ios-device-android-4k
+          key: kernarium-runtime-${{ runner.os }}-${{ steps.pin.outputs.key }}
+
+      - name: ランタイムを構成（cmake --preset kernarium-ios-device-android）
+        working-directory: vendor/kernarium
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci/timed.sh" "cmake configure" \
+            cmake -DPython3_EXECUTABLE="$(command -v python3)" --preset kernarium-ios-device-android
+
+      - name: ランタイムをビルド
+        working-directory: vendor/kernarium
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci/timed.sh" "cmake build" \
+            cmake --build --preset kernarium-ios-device-android
+
+      - name: キャッシュ保存（ランタイムのビルドツリー）
+        if: steps.cache-runtime.outputs.cache-hit != 'true' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: vendor/kernarium/.build/kernarium-runtime-ios-device-android-4k
+          key: kernarium-runtime-${{ runner.os }}-${{ steps.pin.outputs.key }}
+
+      # ---- パッケージとイメージ ----
+      - name: XCFramework を作る（--runtimes android）
+        working-directory: vendor/kernarium
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci/timed.sh" "package xcframeworks" \
+            Kernarium/scripts/package-ios-frameworks.sh --runtimes android
+
+      - name: システムイメージをステージする
+        working-directory: vendor/kernarium
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci/timed.sh" "stage system image" \
+            python3 -I Andarium/scripts/stage-system-image.py
+
+      # ---- 結果 ----
+      - name: 所要時間とサイズのまとめ
+        if: always()
+        run: bash scripts/ci/android-runtime-summary.sh
+
+      - name: 成果物を上げる（XCFramework とステージ済みイメージ）
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-runtime-${{ steps.pin.outputs.ref }}
+          path: |
+            vendor/kernarium/.build/kernarium-xcframeworks
+            vendor/kernarium/.build/andarium-system
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: 所要時間の記録を上げる
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-runtime-timings
+          path: .timings.tsv
+          retention-days: 7
+          if-no-files-found: ignore
