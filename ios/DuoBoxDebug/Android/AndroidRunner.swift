@@ -35,6 +35,11 @@ final class AndroidRunner: ObservableObject {
     @Published private(set) var phase = Phase.waiting
     /// ゲストのコンソール出力の末尾。起動中の表示と、失敗理由の補助に使う
     @Published private(set) var consoleTail = ""
+    /// adb 中継（パソコンからの adb connect を受ける）の状態の 1 行
+    @Published private(set) var bridgeStatus = "adb 中継: 未開始"
+    /// パソコン側で打つコマンド（IP が取れなければその旨）。起動中パネルに出す
+    @Published private(set) var adbConnectHint = AndroidAdbBridge.connectHint()
+    private var bridge: AndroidAdbBridge?
 
     /// 報告用のまとめ文。画面の「ログを共有」からそのまま送れる形
     var reportText: String {
@@ -63,6 +68,8 @@ final class AndroidRunner: ObservableObject {
         case .ended(let byUser):
             lines.append("状態: 終了（\(byUser ? "戻る操作" : "ゲスト側")）")
         }
+        lines.append(bridgeStatus)
+        lines.append("接続先: \(adbConnectHint)")
         lines.append("--- コンソール出力（末尾） ---")
         lines.append(consoleTail.isEmpty ? "（なし）" : consoleTail)
         return lines.joined(separator: "\n")
@@ -159,6 +166,7 @@ final class AndroidRunner: ObservableObject {
         phase = .booting
         UIApplication.shared.isIdleTimerDisabled = true
         startDisplayPolling()
+        startBridge()
         let releasePath = release.path
         let dataPath = dataDisk.path
         let recordPath = sessionRecord.path
@@ -227,6 +235,7 @@ final class AndroidRunner: ObservableObject {
         case .booting, .running:
             guard let stop = runStop else { return }
             phase = .stopping
+            stopBridge()
             if stop.request() {
                 // ゲストの書き戻しを先にしてからホストの停止。ランタイムが返るまで 1 秒おきに繰り返す
                 GuestStopDelivery.deliver(
@@ -242,6 +251,7 @@ final class AndroidRunner: ObservableObject {
     private func finished(result: Int32) {
         displayPoll?.cancel()
         displayPoll = nil
+        stopBridge()
         kernarium_runtime_loader_set_console_output_handler(nil)
         kernarium_runtime_loader_set_restart_handler(nil)
         runStop = nil
@@ -258,6 +268,22 @@ final class AndroidRunner: ObservableObject {
     private func fail(_ reason: String) {
         print("DuoBox Android: \(reason)")
         phase = .failed(reason)
+    }
+
+    // MARK: adb 中継
+
+    private func startBridge() {
+        adbConnectHint = AndroidAdbBridge.connectHint()
+        let bridge = AndroidAdbBridge { [weak self] text in
+            Task { @MainActor in self?.bridgeStatus = text }
+        }
+        self.bridge = bridge
+        bridge.start()
+    }
+
+    private func stopBridge() {
+        bridge?.stop()
+        bridge = nil
     }
 
     // MARK: 補助

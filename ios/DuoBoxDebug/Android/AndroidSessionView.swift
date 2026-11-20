@@ -36,6 +36,10 @@ struct AndroidSessionView: View {
                 Text("解釈実行のため、最初の起動には数分かかることがあります")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.6))
+                Text("パソコンから: \(runner.adbConnectHint)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .textSelection(.enabled)
                 consoleView
                 shareLogButton
             }

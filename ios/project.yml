@@ -153,7 +153,7 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        NSLocalNetworkUsageDescription: 同じネットワークにあるPCに接続するために使います
+        NSLocalNetworkUsageDescription: Android への接続をパソコンから受け付けるために使います
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
   # 同梱の DuoFlick キーボード拡張。本体は DuoFlickKeyboardCore パッケージ側にある
