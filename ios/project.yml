@@ -15,7 +15,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.30.0"
-    CURRENT_PROJECT_VERSION: "69"
+    CURRENT_PROJECT_VERSION: "70"
 targets:
   DuoBox:
     type: application
@@ -50,16 +50,17 @@ targets:
     dependencies:
       - package: DuoRemoteCore
       - target: DuoBoxKeyboard
-  # デバッグ版。中身は DuoBox と同じソースで、IDとアイコンと色だけを変えて、横に並べて入れられるようにした
+  # デバッグ版。専用のソース（DuoBoxDebug/）を持ち、中身を本番と別々に変えられる。
+  # 作りは本番と同じで、IDとアイコンと色が違う。横に並べて入れられる
   DuoBoxDebug:
     type: application
     platform: iOS
     sources:
-      - DuoBox
+      - DuoBoxDebug
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.duoremote.app.debug
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIconDebug
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: NO
     info:
