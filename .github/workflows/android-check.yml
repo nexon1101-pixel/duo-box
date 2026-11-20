@@ -1,0 +1,35 @@
+name: Android check
+
+# 段1：Kernarium のピン取得 + Releases 成果物の照合だけ（Xcode ビルドはしない）
+on:
+  push:
+    branches: [feat/android]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Kernarium 取得 + 成果物の照合
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci/fetch-kernarium.sh
+
+      - name: 成果物のサイズ
+        run: |
+          du -sh vendor/kernarium/.build/kernel/artifacts/* vendor/kernarium/.build/android/releases/*
+          df -h . | tail -n1
+
+      - name: Kernarium のコピーがコミット対象に入っていないこと
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --porcelain
+            echo "取得物が .gitignore されていません" >&2
+            exit 1
+          fi
