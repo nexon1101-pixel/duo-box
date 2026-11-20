@@ -8,6 +8,7 @@ struct HomeView: View {
             BoxBackground()
             VStack(alignment: .leading, spacing: 28) {
                 Wordmark()
+                AndroidEntryCard()
                 Spacer()
                 Text("まだ何も入っていません")
                     .font(.subheadline)
