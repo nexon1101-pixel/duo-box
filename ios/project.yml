@@ -15,7 +15,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.30.0"
-    CURRENT_PROJECT_VERSION: "72"
+    CURRENT_PROJECT_VERSION: "73"
 targets:
   DuoBox:
     type: application
@@ -50,7 +50,7 @@ targets:
     dependencies:
       - package: DuoRemoteCore
       - target: DuoBoxKeyboard
-  # デバッグ版。専用のソース（DuoBoxDebug/）を持ち、中身を本番と別々に変えられる。
+  # デバッグ版。専用のソース（DuoBoxDebug/）を持つ、今は中身を入れていない箱だけのアプリ。
   # 作りは本番と同じで、IDとアイコンと色が違う。横に並べて入れられる
   DuoBoxDebug:
     type: application
@@ -80,9 +80,6 @@ targets:
         NSLocalNetworkUsageDescription: 同じネットワークにあるPCに接続するために使います
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-    dependencies:
-      - package: DuoRemoteCore
-      - target: DuoBoxKeyboardDebug
   # 同梱の DuoFlick キーボード拡張。本体は DuoFlickKeyboardCore パッケージ側にある
   DuoBoxKeyboard:
     type: app-extension
@@ -108,30 +105,4 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.duoremote.app.keyboard
-        TARGETED_DEVICE_FAMILY: "1,2"
-  # デバッグ版のキーボード拡張
-  DuoBoxKeyboardDebug:
-    type: app-extension
-    platform: iOS
-    sources:
-      - KeyboardHostDebug
-      - path: ../vendor/DuoFlick/Keyboard/SkkDict
-        type: folder
-    dependencies:
-      - package: DuoFlickKeyboardCore
-    info:
-      path: KeyboardHostDebug/Info.plist
-      properties:
-        CFBundleDisplayName: DuoFlick Debug
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.keyboard-service
-          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).DuoFlickKeyboardHost
-          NSExtensionAttributes:
-            IsASCIICapable: false
-            PrefersRightToLeft: false
-            PrimaryLanguage: ja-JP
-            RequestsOpenAccess: true
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.duoremote.app.debug.keyboard
         TARGETED_DEVICE_FAMILY: "1,2"
