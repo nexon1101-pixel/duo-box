@@ -201,6 +201,15 @@ jobs:
         if: always()
         run: bash scripts/ci/android-runtime-summary.sh
 
+      # ios-build.yml がデバッグ版の組み込みに使う。artifact は保持3日なので、キャッシュにも置く（正はこちら）
+      - name: キャッシュ保存（XCFramework とステージ済みイメージ）
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            vendor/kernarium/.build/kernarium-xcframeworks
+            vendor/kernarium/.build/andarium-system
+          key: kernarium-products-${{ runner.os }}-${{ steps.pin.outputs.key }}
+
       - name: 成果物を上げる（XCFramework とステージ済みイメージ）
         uses: actions/upload-artifact@v4
         with:

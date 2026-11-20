@@ -11,6 +11,8 @@ on:
 # ipa を「latest」のリリースに置くため、書き込みを許す
 permissions:
   contents: write
+  # 段2の成果物（artifact）を、キャッシュに無いときの代わりとして取るため
+  actions: read
 
 jobs:
   build:
@@ -31,6 +33,55 @@ jobs:
         with:
           repository: nexon1101-pixel/DuoFlick
           path: vendor/DuoFlick
+
+      # ---- Android（Kernarium）：デバッグ版だけが使う。本番のビルド手順には関係しない ----
+      - name: Kernarium のピンを読む
+        id: pin
+        run: |
+          ref=$(grep -E '^KERNARIUM_REF=' ios/kernarium.pin | head -n1 | cut -d= -f2)
+          tag=$(grep -E '^KERNARIUM_RELEASE_TAG=' ios/kernarium.pin | head -n1 | cut -d= -f2)
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::KERNARIUM_REF が不正です"; exit 1; }
+          [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::KERNARIUM_RELEASE_TAG が不正です"; exit 1; }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          # android-runtime.yml のキャッシュキーと同じ形（作り直すときは両方の v1 を上げる）
+          echo "key=${ref}-${tag}-v1" >> "$GITHUB_OUTPUT"
+
+      # ソースだけ（GuestHost の Swift/ObjC とヘッダー、本元の埋め込みスクリプト）。ピンのコミット固定
+      - uses: actions/checkout@v4
+        with:
+          repository: imxieyi/Kernarium
+          ref: ${{ steps.pin.outputs.ref }}
+          path: vendor/kernarium
+
+      # 成果物（XCFramework 群とステージ済みイメージ）は、先にキャッシュから。
+      # android-runtime.yml が成功時に保存する（artifact は保持3日で消えるので、正はキャッシュ）
+      - name: 段2の成果物を復元（キャッシュ）
+        id: runtime-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            vendor/kernarium/.build/kernarium-xcframeworks
+            vendor/kernarium/.build/andarium-system
+          key: kernarium-products-${{ runner.os }}-${{ steps.pin.outputs.key }}
+
+      # キャッシュに無いとき：android-runtime の直近の成功実行の artifact を使う（保持期間内のみ）
+      - name: 段2の成果物を復元（artifact、キャッシュに無いとき）
+        id: runtime-artifact
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ steps.pin.outputs.ref }}
+        run: |
+          mkdir -p vendor/kernarium/.build
+          for id in $(gh run list --workflow android-runtime.yml --status success --limit 20 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$id" --name "android-runtime-$REF" --dir vendor/kernarium/.build; then
+              echo "artifact を run $id から取りました"
+              exit 0
+            fi
+          done
+          echo "::error::android-runtime-$REF の artifact が見つかりません（保持期間切れの可能性）。android-runtime を実行し直してください"
+          exit 1
 
       - name: Xcodeを選ぶ（入っている中でいちばん新しいもの）
         run: |
@@ -69,6 +120,18 @@ jobs:
               exit 1
             }
 
+      # 成果物が復元できていなければ、本番のビルドが済んだあとで止める（本番のビルドは巻き込まない）
+      - name: Android の成果物が揃っているか確かめる
+        run: |
+          B=vendor/kernarium/.build
+          missing=0
+          for p in KRuntime_Android_6_18_4K MesaEGL MesaGallium KosmicKrisp LibZstd; do
+            [ -d "$B/kernarium-xcframeworks/$p.xcframework" ] || { echo "::error::$p.xcframework がありません"; missing=1; }
+          done
+          [ -d "$B/andarium-system" ] || { echo "::error::andarium-system がありません"; missing=1; }
+          [ "$missing" = 0 ] || { echo "::error::段2の成果物を復元できませんでした（android-runtime を先に成功させてください）"; exit 1; }
+          du -sh "$B/kernarium-xcframeworks" "$B/andarium-system"
+
       - name: デバッグ版をビルドする
         working-directory: ios
         run: |
@@ -87,6 +150,28 @@ jobs:
               grep -E "error:" build-debug.log | sort -u | head -15 | while IFS= read -r l; do echo "::error::${l:0:400}"; done
               exit 1
             }
+
+      - name: デバッグ版の中身を確かめる（組み込み）
+        working-directory: ios
+        run: |
+          APP=build/Build/Products/Release-iphoneos/DuoBoxDebug.app
+          ls "$APP/Frameworks" || true
+          for f in KRuntime_Android_6_18_4K MesaEGL MesaGallium KosmicKrisp; do
+            [ -d "$APP/Frameworks/$f.framework" ] || { echo "::error::$f.framework がアプリに入っていません"; exit 1; }
+          done
+          [ -d "$APP/andarium-system" ] || { echo "::error::andarium-system がアプリに入っていません"; exit 1; }
+          du -sh "$APP"
+
+      # 未署名ビルドには entitlements が付かない。SideStore が署名し直すときに読めるよう、擬似署名で埋める（デバッグ版だけ）
+      - name: デバッグ版に entitlements を埋める（ldid）
+        working-directory: ios
+        run: |
+          brew install ldid
+          APP=build/Build/Products/Release-iphoneos/DuoBoxDebug.app
+          ldid -SDuoBoxDebug/DuoBoxDebug.entitlements "$APP/DuoBoxDebug"
+          ldid -e "$APP/DuoBoxDebug" | tee /tmp/ents.xml
+          grep -q "kernel.increased-memory-limit" /tmp/ents.xml
+          grep -q "kernel.extended-virtual-addressing" /tmp/ents.xml
 
       - name: 使ったSDKを確かめる
         working-directory: ios
