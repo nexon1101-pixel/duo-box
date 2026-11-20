@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// デバッグ版の箱。中身（モジュール）はまだ入れず、器だけを用意した状態。
+/// サンドボックス版の箱。中身（モジュール）はまだ入れず、器だけを用意した状態。
 /// 試したいモジュールが出てきたら、ここにカードと画面を足していく。
 struct HomeView: View {
     var body: some View {
@@ -27,7 +27,7 @@ struct HomeView: View {
 
     private var versionText: String {
         let info = Bundle.main.infoDictionary
-        let name = info?["CFBundleDisplayName"] as? String ?? "DuoBox Debug"
+        let name = info?["CFBundleDisplayName"] as? String ?? "DuoBox Sandbox"
         let version = info?["CFBundleShortVersionString"] as? String ?? ""
         return "\(name) \(version)"
     }
@@ -63,7 +63,7 @@ private struct Wordmark: View {
                         startPoint: .leading, endPoint: .trailing
                     )
                 )
-            Text("DEBUG")
+            Text("SANDBOX")
                 .font(.caption.weight(.semibold))
                 .tracking(4)
                 .foregroundStyle(.white.opacity(0.45))
