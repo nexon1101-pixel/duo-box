@@ -12,36 +12,45 @@ struct RootView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .bottomTrailing) {
             switch screen {
             case .home:
                 HomeView(onOpen: { screen = $0 })
             case .remote:
-                ContentView()
+                remoteView
             case .keyboard:
                 KeyboardInfoView()
             }
 
             // 接続中はリモート操作の邪魔をしないよう、戻るボタンを出さない
+            // （接続中の戻りは、リモート画面の右上メニューの「ホームへ戻る」から行う）
             if screen != .home && !session.isConnectedOrReconnecting {
                 Button {
                     screen = .home
                 } label: {
                     Image(systemName: "house.fill")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 44, height: 44)
+                        .frame(width: 48, height: 48)
                         .background(.ultraThinMaterial, in: Circle())
                         .overlay(
                             Circle().strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
                         )
+                        .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
                 }
                 .accessibilityLabel("ホームへ戻る")
-                .padding(.trailing, 16)
-                .padding(.top, 8)
+                .padding(.trailing, 20)
+                .padding(.bottom, 20)
                 .zIndex(1)
             }
         }
+    }
+
+    /// リモート画面。右上メニューの「ホームへ戻る」で、接続したままホームへ戻れる。
+    private var remoteView: some View {
+        var view = ContentView()
+        view.onExitToHome = { screen = .home }
+        return view
     }
 }
 
