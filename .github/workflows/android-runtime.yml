@@ -60,10 +60,12 @@ jobs:
             brew install cmake ninja make meson pkg-config rsync autoconf automake gettext libtool gperf groff bison flex gh python@3.12
             brew link --force gettext || true
           '
-          # 新しい Python / bison を先に使う（macOS 標準の python3 は 3.9、bison は 2.3）
+          # 新しい Python を先に使う（macOS 標準の python3 は 3.9）
+          # 注意：bison は PATH に足さない。本元 build-apple-gpu.sh は「bison 2.x が
+          # 見つかったら文法シムを使う」作りで、検出だけ bison 3 になると実行時は
+          # /usr/bin/bison (2.3) がシムなしで走り Mesa の文法で落ちる（実証済み）。
           PY_BIN="$(brew --prefix python@3.12)/libexec/bin"
           echo "$PY_BIN" >> "$GITHUB_PATH"
-          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix gettext)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
 
