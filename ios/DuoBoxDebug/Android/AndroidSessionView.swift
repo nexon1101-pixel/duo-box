@@ -37,6 +37,7 @@ struct AndroidSessionView: View {
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.6))
                 consoleView
+                shareLogButton
             }
         case .stopping:
             statusPanel {
@@ -56,6 +57,7 @@ struct AndroidSessionView: View {
                     .multilineTextAlignment(.center)
                     .textSelection(.enabled)
                 consoleView
+                shareLogButton
                 Button("戻る") { dismiss() }
                     .buttonStyle(.borderedProminent)
             }
@@ -63,12 +65,22 @@ struct AndroidSessionView: View {
             statusPanel {
                 Text("Android が終了しました")
                     .font(.headline)
+                consoleView
+                shareLogButton
                 Button("戻る") { dismiss() }
                     .buttonStyle(.borderedProminent)
             }
         case .running, .ended(byUser: true):
             EmptyView()
         }
+    }
+
+    /// ログの共有ボタン。状態・理由・コンソール末尾をまとめた文を共有シートへ出す
+    private var shareLogButton: some View {
+        ShareLink(item: runner.reportText) {
+            Label("ログを共有", systemImage: "square.and.arrow.up")
+        }
+        .buttonStyle(.bordered)
     }
 
     /// 起動中・失敗時だけ出す、ゲストのコンソールの末尾（原因調べ用）

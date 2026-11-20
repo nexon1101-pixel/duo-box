@@ -36,6 +36,38 @@ final class AndroidRunner: ObservableObject {
     /// ゲストのコンソール出力の末尾。起動中の表示と、失敗理由の補助に使う
     @Published private(set) var consoleTail = ""
 
+    /// 報告用のまとめ文。画面の「ログを共有」からそのまま送れる形
+    var reportText: String {
+        var machine = utsname()
+        uname(&machine)
+        let model = Mirror(reflecting: machine.machine).children.reduce("") { acc, child in
+            guard let value = child.value as? Int8, value != 0 else { return acc }
+            return acc + String(UnicodeScalar(UInt8(value)))
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let info = Bundle.main.infoDictionary
+        var lines = [
+            "DuoBox Sandbox Android 起動ログ（\(formatter.string(from: Date()))）",
+            "端末: \(model) / iOS \(UIDevice.current.systemVersion)",
+            "アプリ: \(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?"))",
+        ]
+        switch phase {
+        case .waiting: lines.append("状態: 起動待ち")
+        case .booting: lines.append("状態: 起動中")
+        case .running: lines.append("状態: 起動済み")
+        case .stopping: lines.append("状態: 停止中")
+        case .failed(let reason):
+            lines.append("状態: 失敗")
+            lines.append("理由: \(reason)")
+        case .ended(let byUser):
+            lines.append("状態: 終了（\(byUser ? "戻る操作" : "ゲスト側")）")
+        }
+        lines.append("--- コンソール出力（末尾） ---")
+        lines.append(consoleTail.isEmpty ? "（なし）" : consoleTail)
+        return lines.joined(separator: "\n")
+    }
+
     /// 本元 LiveRuntime.androidFlavor と同じ値（Android 用ランタイムを選ぶ）
     private static let androidFlavor: UInt32 = 1
     /// 本元と同じバンドル内フォルダ名（project.yml が ../vendor/kernarium/.build/andarium-system を入れる）
