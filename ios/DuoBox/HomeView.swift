@@ -12,7 +12,7 @@ struct RootView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
+        ZStack(alignment: .topTrailing) {
             switch screen {
             case .home:
                 HomeView(onOpen: { screen = $0 })
@@ -27,17 +27,17 @@ struct RootView: View {
                 Button {
                     screen = .home
                 } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "chevron.left")
-                        Text("ホーム")
-                    }
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    Image(systemName: "house.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(
+                            Circle().strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
+                        )
                 }
-                .padding(.leading, 16)
+                .accessibilityLabel("ホームへ戻る")
+                .padding(.trailing, 16)
                 .padding(.top, 8)
                 .zIndex(1)
             }
