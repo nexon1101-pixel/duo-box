@@ -15,7 +15,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.30.0"
-    CURRENT_PROJECT_VERSION: "68"
+    CURRENT_PROJECT_VERSION: "69"
 targets:
   DuoBox:
     type: application
@@ -50,6 +50,38 @@ targets:
     dependencies:
       - package: DuoRemoteCore
       - target: DuoBoxKeyboard
+  # デバッグ版。中身は DuoBox と同じソースで、IDとアイコンと色だけを変えて、横に並べて入れられるようにした
+  DuoBoxDebug:
+    type: application
+    platform: iOS
+    sources:
+      - DuoBox
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duoremote.app.debug
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIconDebug
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+    info:
+      path: DuoBoxDebug/Info.plist
+      properties:
+        CFBundleDisplayName: DuoBox Debug
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocalNetworkUsageDescription: 同じネットワークにあるPCに接続するために使います
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    dependencies:
+      - package: DuoRemoteCore
+      - target: DuoBoxKeyboardDebug
   # 同梱の DuoFlick キーボード拡張。本体は DuoFlickKeyboardCore パッケージ側にある
   DuoBoxKeyboard:
     type: app-extension
@@ -75,4 +107,30 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.duoremote.app.keyboard
+        TARGETED_DEVICE_FAMILY: "1,2"
+  # デバッグ版のキーボード拡張
+  DuoBoxKeyboardDebug:
+    type: app-extension
+    platform: iOS
+    sources:
+      - KeyboardHost
+      - path: ../vendor/DuoFlick/Keyboard/SkkDict
+        type: folder
+    dependencies:
+      - package: DuoFlickKeyboardCore
+    info:
+      path: KeyboardHostDebug/Info.plist
+      properties:
+        CFBundleDisplayName: DuoFlick Debug
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).DuoFlickKeyboardHost
+          NSExtensionAttributes:
+            IsASCIICapable: false
+            PrefersRightToLeft: false
+            PrimaryLanguage: ja-JP
+            RequestsOpenAccess: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duoremote.app.debug.keyboard
         TARGETED_DEVICE_FAMILY: "1,2"

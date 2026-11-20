@@ -69,6 +69,25 @@ jobs:
               exit 1
             }
 
+      - name: デバッグ版をビルドする
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project DuoBox.xcodeproj \
+            -scheme DuoBoxDebug \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build-debug.log || {
+              grep -E "error:" build-debug.log | sort -u | head -15 | while IFS= read -r l; do echo "::error::${l:0:400}"; done
+              exit 1
+            }
+
       - name: 使ったSDKを確かめる
         working-directory: ios
         run: |
@@ -87,11 +106,17 @@ jobs:
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/DuoBox.app Payload/
           zip -qr DuoBox.ipa Payload
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/DuoBoxDebug.app Payload/
+          zip -qr DuoBoxDebug.ipa Payload
 
       - uses: actions/upload-artifact@v4
         with:
           name: DuoBox-ipa
-          path: ios/DuoBox.ipa
+          path: |
+            ios/DuoBox.ipa
+            ios/DuoBoxDebug.ipa
           if-no-files-found: error
 
       # iPhoneの Safari から取りやすいよう、ipa を「latest」のリリースにも置く（毎回上書き）
@@ -102,7 +127,7 @@ jobs:
           gh release view latest >/dev/null 2>&1 || gh release create latest --title "最新のビルド" --notes "最新のビルドの ipa（毎回上書き）" --target "$GITHUB_SHA"
           # GitHub 側の一時的な失敗（HTTP 500）があるので、何度かやり直す
           for i in 1 2 3 4 5 6; do
-            if gh release upload latest ios/DuoBox.ipa --clobber; then
+            if gh release upload latest ios/DuoBox.ipa ios/DuoBoxDebug.ipa --clobber; then
               exit 0
             fi
             echo "::warning::アップロードに失敗しました（$i 回目）。やり直します"

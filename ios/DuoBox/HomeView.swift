@@ -54,17 +54,36 @@ struct RootView: View {
     }
 }
 
-/// 画面全体の背景。アイコンと同じ、濃い紺にシアンと紫の光がにじむ感じ。
+/// デバッグ版（別アプリとして入れた方）かどうかは、アプリのIDで見分ける。
+/// 中身は同じ作りで、色だけをデバッグ風（赤系）に寄せる。
+private enum BoxPalette {
+    static var isDebug: Bool { Bundle.main.bundleIdentifier?.contains(".debug") == true }
+
+    static var glowA: Color { isDebug ? .red : .cyan }
+    static var glowB: Color { isDebug ? .orange : .purple }
+    static var wordmark: [Color] {
+        isDebug ? [.red, .orange]
+                : [.cyan, Color(red: 0.55, green: 0.45, blue: 1.0)]
+    }
+    static var remote: [Color] { isDebug ? [.red, .orange] : [.cyan, .blue] }
+    static var keyboard: [Color] {
+        isDebug ? [.orange, .pink]
+                : [.purple, Color(red: 0.85, green: 0.35, blue: 1.0)]
+    }
+    static var caption: String { isDebug ? "DEBUG" : "LAUNCHER" }
+}
+
+/// 画面全体の背景。アイコンと同じ、濃い地に2色の光がにじむ感じ。
 private struct BoxBackground: View {
     var body: some View {
         ZStack {
             Color(red: 0.02, green: 0.03, blue: 0.07)
             RadialGradient(
-                colors: [Color.cyan.opacity(0.20), .clear],
+                colors: [BoxPalette.glowA.opacity(0.20), .clear],
                 center: .topLeading, startRadius: 0, endRadius: 420
             )
             RadialGradient(
-                colors: [Color.purple.opacity(0.22), .clear],
+                colors: [BoxPalette.glowB.opacity(0.22), .clear],
                 center: .bottomTrailing, startRadius: 0, endRadius: 460
             )
         }
@@ -80,11 +99,11 @@ private struct Wordmark: View {
                 .font(.system(size: 36, weight: .bold, design: .rounded))
                 .foregroundStyle(
                     LinearGradient(
-                        colors: [.cyan, Color(red: 0.55, green: 0.45, blue: 1.0)],
+                        colors: BoxPalette.wordmark,
                         startPoint: .leading, endPoint: .trailing
                     )
                 )
-            Text("LAUNCHER")
+            Text(BoxPalette.caption)
                 .font(.caption.weight(.semibold))
                 .tracking(4)
                 .foregroundStyle(.white.opacity(0.45))
@@ -108,13 +127,13 @@ private struct HomeView: View {
                             title: "リモート",
                             detail: "PCの画面を見て、操作する",
                             systemImage: "display",
-                            colors: [.cyan, .blue]
+                            colors: BoxPalette.remote
                         ) { onOpen(.remote) }
                         moduleCard(
                             title: "キーボード",
                             detail: "DuoFlick を追加して使う",
                             systemImage: "keyboard",
-                            colors: [.purple, Color(red: 0.85, green: 0.35, blue: 1.0)]
+                            colors: BoxPalette.keyboard
                         ) { onOpen(.keyboard) }
                     }
 
@@ -133,8 +152,9 @@ private struct HomeView: View {
 
     private var versionText: String {
         let info = Bundle.main.infoDictionary
+        let name = info?["CFBundleDisplayName"] as? String ?? "DuoBox"
         let version = info?["CFBundleShortVersionString"] as? String ?? ""
-        return "DuoBox \(version)"
+        return "\(name) \(version)"
     }
 
     private func moduleCard(title: String, detail: String, systemImage: String,
@@ -188,7 +208,7 @@ private struct KeyboardInfoView: View {
                             .frame(width: 48, height: 48)
                             .background(
                                 LinearGradient(
-                                    colors: [.purple, Color(red: 0.85, green: 0.35, blue: 1.0)],
+                                    colors: BoxPalette.keyboard,
                                     startPoint: .topLeading, endPoint: .bottomTrailing
                                 ),
                                 in: RoundedRectangle(cornerRadius: 13, style: .continuous)
@@ -224,7 +244,7 @@ private struct KeyboardInfoView: View {
                             .padding(.vertical, 12)
                             .background(
                                 LinearGradient(
-                                    colors: [.purple, Color(red: 0.85, green: 0.35, blue: 1.0)],
+                                    colors: BoxPalette.keyboard,
                                     startPoint: .leading, endPoint: .trailing
                                 ),
                                 in: Capsule()
@@ -246,7 +266,7 @@ private struct KeyboardInfoView: View {
                 .frame(width: 26, height: 26)
                 .background(
                     LinearGradient(
-                        colors: [Color.purple.opacity(0.8), Color(red: 0.85, green: 0.35, blue: 1.0).opacity(0.8)],
+                        colors: BoxPalette.keyboard.map { $0.opacity(0.8) },
                         startPoint: .topLeading, endPoint: .bottomTrailing
                     ),
                     in: Circle()
