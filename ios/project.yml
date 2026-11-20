@@ -15,7 +15,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.30.0"
-    CURRENT_PROJECT_VERSION: "71"
+    CURRENT_PROJECT_VERSION: "72"
 targets:
   DuoBox:
     type: application
@@ -114,7 +114,7 @@ targets:
     type: app-extension
     platform: iOS
     sources:
-      - KeyboardHost
+      - KeyboardHostDebug
       - path: ../vendor/DuoFlick/Keyboard/SkkDict
         type: folder
     dependencies:
