@@ -126,7 +126,12 @@ targets:
         basedOnDependencyAnalysis: false
         shell: /bin/sh
         script: |
-          /bin/sh "$SRCROOT/../vendor/kernarium/Kernarium/scripts/embed-device-framework.sh" --optional "$SRCROOT/../vendor/kernarium/.build/kernarium-xcframeworks/UmlArm64Aot.xcframework"
+          # ピン（1.0b15）の embed-device-framework.sh は --optional 未対応（main 先頭で追加された）。
+          # 有無の判定はこちらでやる
+          XCF="$SRCROOT/../vendor/kernarium/.build/kernarium-xcframeworks/UmlArm64Aot.xcframework"
+          if [ -d "$XCF" ]; then
+            /bin/sh "$SRCROOT/../vendor/kernarium/Kernarium/scripts/embed-device-framework.sh" "$XCF"
+          fi
     info:
       path: DuoBoxDebug/Info.plist
       properties:
