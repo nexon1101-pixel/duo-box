@@ -41,6 +41,19 @@ final class HologramRig {
         lowerCamera.camera = SCNCamera()
         scene.rootNode.addChildNode(upperCamera)
         scene.rootNode.addChildNode(lowerCamera)
+        // USDZ の PBR マテリアル用に照明を足す（壁と台座は .constant なので影響を受けない）
+        let ambient = SCNNode()
+        ambient.light = SCNLight()
+        ambient.light?.type = .ambient
+        ambient.light?.intensity = 700
+        scene.rootNode.addChildNode(ambient)
+        let key = SCNNode()
+        key.light = SCNLight()
+        key.light?.type = .directional
+        key.light?.intensity = 900
+        key.position = SCNVector3(0.05, 0.15, 0.25)
+        key.look(at: SCNVector3(0, 0, -0.1))
+        scene.rootNode.addChildNode(key)
     }
 
     /// 上下の半分の大きさ（メートル）。変わったときだけ箱を作り直す。
@@ -112,18 +125,36 @@ final class HologramRig {
         worldNode.addChildNode(pad)
         worldNode.addChildNode(ringNode)
 
-        // 雨衣ちゃん（1枚絵プレーン）。台座の上に立たせ、ゆっくり上下に浮遊させる
-        let charH = min(totalH * 0.5, 0.11)
-        let plane = SCNPlane(width: charH * 2 / 3, height: charH)
-        let cm = SCNMaterial()
-        cm.lightingModel = .constant
-        cm.diffuse.contents = AmekoroTexture.load()
-        cm.isDoubleSided = true
-        cm.transparencyMode = .aOne
-        plane.materials = [cm]
+        // 雨衣ちゃん（公式MMDモデルを USDZ に変換したもの）。台座の上に立たせ、ゆっくり上下に浮遊させる
+        let charH = min(totalH * 0.55, 0.115)
         characterNode.removeAllActions()
-        characterNode.geometry = plane
-        characterNode.position = SCNVector3(0, floorY + 0.006 + Float(charH) / 2, padZ)
+        characterNode.geometry = nil
+        characterNode.childNodes.forEach { $0.removeFromParentNode() }
+        if let url = Bundle.main.url(forResource: "amekoro", withExtension: "usdz"),
+           let modelScene = try? SCNScene(url: url, options: nil) {
+            let wrap = SCNNode()
+            for child in Array(modelScene.rootNode.childNodes) { wrap.addChildNode(child) }
+            // モデルの実寸（約1.53m）を目標の高さへ縮小し、足元が原点に来るようそろえる
+            let (minB, maxB) = wrap.boundingBox
+            let h = max(maxB.y - minB.y, 0.001)
+            let s = charH / h
+            wrap.scale = SCNVector3(s, s, s)
+            wrap.position = SCNVector3(-minB.x * s, -minB.y * s, -minB.z * s)
+            characterNode.addChildNode(wrap)
+        } else {
+            // モデルが読めないときの保険（従来の1枚絵プレーン）
+            let plane = SCNPlane(width: charH * 2 / 3, height: charH)
+            let cm = SCNMaterial()
+            cm.lightingModel = .constant
+            cm.diffuse.contents = AmekoroTexture.load()
+            cm.isDoubleSided = true
+            cm.transparencyMode = .aOne
+            plane.materials = [cm]
+            let holder = SCNNode(geometry: plane)
+            holder.position = SCNVector3(0, Float(charH) / 2, 0)
+            characterNode.addChildNode(holder)
+        }
+        characterNode.position = SCNVector3(0, floorY + 0.004, padZ)
         // 向きは毎フレーム update() で視点のほうへ回す（SCNBillboardConstraint は
         // 2つの view のカメラを区別できず片方にしか向かないため使わない）
         let bob = SCNAction.sequence([
