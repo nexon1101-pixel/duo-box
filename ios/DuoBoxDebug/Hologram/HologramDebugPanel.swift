@@ -186,17 +186,7 @@ struct HologramDebugPanel: View {
         }
     }
 
-    // MARK: キャリブレーション
-
-    private var axisStepTitle: String {
-        switch tracker.axisStep {
-        case .idle: return "未実行"
-        case .front: return "手順1/3：正面"
-        case .left: return "手順2/3：左へ"
-        case .up: return "手順3/3：上へ"
-        case .done: return "完了"
-        }
-    }
+    // MARK: 視点（絶対位置・軸対応）
 
     private func axisBinding(isX: Bool) -> Binding<Int> {
         Binding(
@@ -215,37 +205,31 @@ struct HologramDebugPanel: View {
 
     private var calibrationSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("⑥ 視点キャリブレーション").font(.subheadline.bold())
+            Text("⑥ 視点（絶対位置・軸対応）").font(.subheadline.bold())
+            Text("目の位置は絶対位置のみ：カメラの位置（機種プロファイル）＋ 軸対応後の目位置。ホーム記録と視差ゲインは廃止した")
+                .font(.caption2).foregroundStyle(.white.opacity(0.7))
 
-            // 切り分け用：生座標とシーン座標を常時表示
+            // 変換前後の表示：rel（ARKit生）→ head（向き変換後）→ 変換後（軸対応適用後）→ シーン座標
             TimelineView(.periodic(from: .now, by: 0.2)) { _ in
                 let h = tracker.head
+                let mp = tracker.mappedHead
                 let r = tracker.rawRel
                 let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
                 VStack(alignment: .leading, spacing: 3) {
                     row("真の生値 rel(m)", String(format: "x%+.3f y%+.3f z%+.3f", r.x, r.y, r.z))
                     row("変換後 head(m)", String(format: "x%+.3f y%+.3f z%+.3f", h.x, h.y, h.z))
+                    row("軸対応後(m)", String(format: "x%+.3f y%+.3f z%+.3f", mp.x, mp.y, mp.z))
                     row("シーン座標(m)", String(format: "x%+.3f y%+.3f z%+.3f", s.eye.x, s.eye.y, s.eye.z))
                     row("顔", tracker.faceActive ? "捕捉中" : "見えていません")
                 }
                 .font(.system(.footnote, design: .monospaced))
             }
 
-            // 軸キャリブレーション
-            Text("軸キャリブレーション（\(axisStepTitle)）").font(.caption.bold())
-            if !tracker.calibMessage.isEmpty {
-                Text(tracker.calibMessage).font(.caption).foregroundStyle(.yellow)
-            }
-            HStack {
-                switch tracker.axisStep {
-                case .front, .left, .up:
-                    Button("記録") { tracker.captureAxisStep() }.buttonStyle(.borderedProminent)
-                    Button("中止") { tracker.cancelAxisCalibration() }.buttonStyle(.bordered)
-                default:
-                    Button("軸を測る") { tracker.startAxisCalibration() }.buttonStyle(.borderedProminent)
-                }
-            }
-            // 検出結果の対応表と手動セレクタ
+            // 軸対応は固定値。マーカー（⑦）で見て向きが逆なら、ここで直す
+            Divider()
+            Text("軸対応（固定値）").font(.caption.bold())
+            Text("マーカーが頭と逆向きに動くときだけ、下の対応を直す。通常は触らない")
+                .font(.caption2).foregroundStyle(.white.opacity(0.7))
             let m = tracker.axisMap
             Text("対応表：シーンX（右）＝ \(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: m.xAxis, sign: m.xSign)])　シーンY（上）＝ \(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: m.yAxis, sign: m.ySign)])（生座標の軸）")
                 .font(.system(.footnote, design: .monospaced))
@@ -261,30 +245,6 @@ struct HologramDebugPanel: View {
                     ForEach(0..<6, id: \.self) { Text(HeadTracker.AxisMap.labels[$0]).tag($0) }
                 }.pickerStyle(.segmented)
             }
-
-            // ホーム位置
-            Divider()
-            Text("ホーム位置").font(.caption.bold())
-            Text("普段の姿勢で正面を見て、ボタンを押す。視差はここからの相対移動で決まり、ここで視点が部屋の正面に来る")
-                .font(.caption2).foregroundStyle(.white.opacity(0.7))
-            Button("普段の姿勢で正面を見て（ホームを記録）") { tracker.recordHome() }
-                .buttonStyle(.borderedProminent)
-            if let h = tracker.homeRaw {
-                Text(String(format: "ホーム（生）: x%+.3f y%+.3f z%+.3f", h.x, h.y, h.z))
-                    .font(.system(.footnote, design: .monospaced))
-            } else {
-                Text("ホーム未記録（既定の基準を使用中）").font(.footnote)
-            }
-
-            // 視差ゲイン
-            Divider()
-            Text("視差ゲイン: ×\(String(format: "%.2f", Double(tracker.gain)))（ホームからの相対移動にだけ掛かる）")
-                .font(.caption)
-            Slider(value: Binding(get: { Double(tracker.gain) }, set: { tracker.setGain(Float($0)) }),
-                   in: Double(HeadTracker.gainRange.lowerBound)...Double(HeadTracker.gainRange.upperBound), step: 0.05)
-
-            Button("キャリブレーションをリセット", role: .destructive) { tracker.resetCalibration() }
-                .buttonStyle(.bordered)
         }
     }
 
