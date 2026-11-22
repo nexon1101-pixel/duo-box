@@ -33,14 +33,18 @@ final class HologramRig {
 
     private let worldNode = SCNNode()
     private let characterNode = SCNNode()
-    /// 呼吸・傾き・フリッカー用。characterNode（Y 回転と浮遊）の子にして干渉させない
     private let idleNode = SCNNode()
     private let shadowNode = SCNNode()
-    private let scanNode = SCNNode()
     private var particles: [(node: SCNNode, base: SIMD3<Float>, phase: Float)] = []
-    private var charHeight: Float = 0.1
-    private var baseY: Float = 0          // キャラの浮遊の基準高さ（台座の上）
+    private var baseY: Float = 0          // キャラの足元の高さ（台座の上）
     private var charBuilt = false
+
+    /// 読み込み済みのモデル（USDZ は 41MB あるので1回だけ読む。折り目が変わっても読み直さない）
+    private var cachedModel: (node: SCNNode, minB: SCNVector3, maxB: SCNVector3)?
+    private var modelLoadTried = false
+    /// 材質名で見つかった修正対象の数と、モデルの材質の総数（計測パネル用）
+    private(set) var materialFound = 0
+    private(set) var materialTotal = 0
 
     private var smoothedEye = SIMD3<Float>(0, 0, 0.30)
     private var smoothedAngle: Float = .pi     // 全開 180° から始める
@@ -181,21 +185,15 @@ final class HologramRig {
         characterNode.geometry = nil
         characterNode.childNodes.forEach { $0.removeFromParentNode() }
         idleNode.childNodes.forEach { $0.removeFromParentNode() }
-        if let url = Bundle.main.url(forResource: "amekoro", withExtension: "usdz"),
-           let modelScene = try? SCNScene(url: url, options: nil) {
-            let wrap = SCNNode()
-            for child in Array(modelScene.rootNode.childNodes) { wrap.addChildNode(child) }
-            // モデルの実寸（約1.53m）を目標の高さへ縮小し、足元が原点に来るようそろえる
-            let (minB, maxB) = wrap.boundingBox
-            let h = max(maxB.y - minB.y, Float(0.001))
+        if let model = loadModelOnce() {
+            // モデルの実寸（約1.53m）を目標の高さへ縮小する。X・Z は中心、Y は足元を原点にそろえる
+            let wrap = model.node
+            let h = max(model.maxB.y - model.minB.y, Float(0.001))
             let s = Float(charH) / h
+            let cx = (model.minB.x + model.maxB.x) / 2
+            let cz = (model.minB.z + model.maxB.z) / 2
             wrap.scale = SCNVector3(s, s, s)
-            wrap.position = SCNVector3(-minB.x * s, -minB.y * s, -minB.z * s)
-            // USDZ の PBR のままだと陰影が灰色っぽく沈むので、全マテリアルを
-            // テクスチャ色そのままの無陰影（.constant）にしてアニメ塗りの色を出す
-            wrap.enumerateChildNodes { node, _ in
-                node.geometry?.materials.forEach { $0.lightingModel = .constant }
-            }
+            wrap.position = SCNVector3(-cx * s, -model.minB.y * s, -cz * s)
             idleNode.addChildNode(wrap)
         } else {
             // モデルが読めないときの保険（従来の1枚絵プレーン）
@@ -213,27 +211,38 @@ final class HologramRig {
         idleNode.removeFromParentNode()
         characterNode.addChildNode(idleNode)
 
-        // ごく淡い走査線：キャラの前を細い帯がゆっくり上へ流れる（強さは控えめ）
-        let scanPlane = SCNPlane(width: charH * 0.7, height: charH * 0.04)
-        let scanMat = SCNMaterial()
-        scanMat.lightingModel = .constant
-        scanMat.diffuse.contents = UIColor(red: 0.5, green: 0.9, blue: 1.0, alpha: 0.10)
-        scanMat.blendMode = .add
-        scanMat.writesToDepthBuffer = false
-        scanMat.isDoubleSided = true
-        scanPlane.materials = [scanMat]
-        scanNode.removeFromParentNode()
-        scanNode.geometry = scanPlane
-        characterNode.addChildNode(scanNode)
-        charHeight = Float(charH)
-
         baseY = floorY + 0.004
         charBuilt = true
         characterNode.position = SCNVector3(0, baseY, padZ)
-        // 向きは毎フレーム update() で視点のほうへ回す（SCNBillboardConstraint は
-        // 2つの view のカメラを区別できず片方にしか向かないため使わない）
-        // 浮遊は SCNAction ではなく update() で sin から計算する（影・傾きと同じ時間軸で動かすため）
+        // 向きは正面固定（視点へは向けない。回り込むと横側が見える）。浮遊・傾きもなし
+        characterNode.eulerAngles = SCNVector3Zero
+        // 接地影は固定（浮遊しないので濃さも大きさも一定）
+        shadowNode.opacity = 0.8
         worldNode.addChildNode(characterNode)
+    }
+
+    /// モデルを1回だけ読み、材質を修正してキャッシュする。読めなければ nil（以後も再試行しない）。
+    private func loadModelOnce() -> (node: SCNNode, minB: SCNVector3, maxB: SCNVector3)? {
+        if let cachedModel { return cachedModel }
+        if modelLoadTried { return nil }
+        modelLoadTried = true
+        guard let url = Bundle.main.url(forResource: "amekoro", withExtension: "usdz"),
+              let modelScene = try? SCNScene(url: url, options: nil) else { return nil }
+        let wrap = SCNNode()
+        for child in Array(modelScene.rootNode.childNodes) { wrap.addChildNode(child) }
+        let (minB, maxB) = wrap.boundingBox
+        // USDZ の PBR のままだと陰影が灰色っぽく沈むので、全マテリアルを
+        // テクスチャ色そのままの無陰影（.constant）にしてアニメ塗りの色を出す
+        wrap.enumerateChildNodes { node, _ in
+            node.geometry?.materials.forEach { $0.lightingModel = .constant }
+        }
+        // 材質名で髪の二重描画（Beret_OFF）と透過髪の不透明度を直す
+        let stats = AmekoroMaterials.apply(to: wrap)
+        materialFound = stats.found
+        materialTotal = stats.total
+        let model = (node: wrap, minB: minB, maxB: maxB)
+        cachedModel = model
+        return model
     }
 
     /// 中心が濃く縁へ向けて消える、暗い半透明の円（影用）。
@@ -302,39 +311,12 @@ final class HologramRig {
                       right: SIMD3(1, 0, 0), up: -d, normal: SIMD3(0, sin(th), -cos(th)),
                       halfW: width / 2, halfH: lowerH / 2)
 
-        // キャラは視点のほうへ向ける（Y 軸まわりだけ）
-        let c = characterNode.simdPosition
-        characterNode.eulerAngles.y = atan2(eye.x - c.x, eye.z - c.z)
-
         updateIdle(time: Float(time.truncatingRemainder(dividingBy: 3600)))
     }
 
-    /// アイドル演出：浮遊・ごく小さな傾き・呼吸・フリッカー・影・微粒子・走査線。すべて控えめ。
+    /// アイドル演出：微粒子だけ残す（浮遊・傾き・呼吸・フリッカー・走査線は止めた）。
     private func updateIdle(time t: Float) {
         guard charBuilt else { return }
-        // 浮遊（0.005m、周期3.2秒）。k は 0（低い）〜1（高い）
-        let k = 0.5 - 0.5 * cos(2 * Float.pi * t / 3.2)
-        characterNode.simdPosition.y = baseY + 0.005 * k
-
-        // 体のごく小さな傾き（±1°）と呼吸（±0.5%）
-        let deg: Float = .pi / 180
-        idleNode.eulerAngles.z = 1.0 * deg * sin(t * 0.7)
-        idleNode.eulerAngles.x = 1.0 * deg * sin(t * 0.53 + 1.0)
-        let breath = 1 + 0.005 * sin(t * 1.9)
-        idleNode.simdScale = SIMD3<Float>(repeating: breath)
-
-        // ごく弱いフリッカー（0.97〜1.0）
-        idleNode.opacity = CGFloat(0.985 + 0.015 * sin(t * 1.7) * sin(t * 0.43 + 0.5))
-
-        // 影：キャラが高いほど薄く小さく
-        shadowNode.opacity = CGFloat(0.8 - 0.3 * k)
-        let ss = 1 - 0.12 * k
-        shadowNode.simdScale = SIMD3<Float>(ss, ss, 1)
-
-        // 走査線：キャラの高さを約6秒で下から上へ流れ、端でフェードする
-        let sp = frac(t / 6)
-        scanNode.simdPosition = SIMD3<Float>(0, charHeight * sp, 0.004)
-        scanNode.opacity = CGFloat(sin(sp * Float.pi))
 
         // 微粒子：基準位置のまわりをゆっくり漂い、またたく
         for p in particles {
@@ -388,6 +370,9 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
         }
     }
     var tracker: HeadTracker? { didSet { rig.tracker = tracker } }
+    /// 計測パネル用の情報の受け渡し先と、パネルを開閉する三本指タップ
+    var diagnostics: HologramDiagnostics?
+    var onThreeFingerTap: (() -> Void)?
 
     private let upperView = SCNView()
     private let lowerView = SCNView()
@@ -419,7 +404,14 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
 
         // 顔トラッキングが使えないときのドラッグ操作
         addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:))))
+
+        // 三本指タップで計測パネルを開閉する
+        let threeTap = UITapGestureRecognizer(target: self, action: #selector(handleThreeFingerTap))
+        threeTap.numberOfTouchesRequired = 3
+        addGestureRecognizer(threeTap)
     }
+
+    @objc private func handleThreeFingerTap() { onThreeFingerTap?() }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -439,6 +431,16 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
         rig.configure(width: Float(bounds.width) * mpp,
                       upperH: Float(fold) * mpp,
                       lowerH: Float(bounds.height - fold) * mpp)
+
+        // 計測パネルへ：折り目のY位置（取れなければ nil）、材質の数
+        let reportedFold: CGFloat? = hinge?.foldY(in: self)
+        let found = rig.materialFound, total = rig.materialTotal
+        DispatchQueue.main.async { [weak self] in
+            guard let d = self?.diagnostics else { return }
+            d.foldY = reportedFold
+            d.materialFound = found
+            d.materialTotal = total
+        }
     }
 
     @objc private func handlePan(_ g: UIPanGestureRecognizer) {
@@ -458,13 +460,19 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
 struct HologramSceneView: UIViewRepresentable {
     let tracker: HeadTracker
     let hinge: HingeMonitor
+    let diagnostics: HologramDiagnostics
+    let onThreeFingerTap: () -> Void
 
     func makeUIView(context: Context) -> HologramContainerView {
         let view = HologramContainerView(frame: .zero)
         view.tracker = tracker
         view.hinge = hinge
+        view.diagnostics = diagnostics
+        view.onThreeFingerTap = onThreeFingerTap
         return view
     }
 
-    func updateUIView(_ uiView: HologramContainerView, context: Context) {}
+    func updateUIView(_ uiView: HologramContainerView, context: Context) {
+        uiView.onThreeFingerTap = onThreeFingerTap
+    }
 }

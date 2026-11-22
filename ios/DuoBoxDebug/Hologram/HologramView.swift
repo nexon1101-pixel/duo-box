@@ -5,6 +5,9 @@ struct HologramView: View {
     var onExit: () -> Void
     @StateObject private var tracker = HeadTracker()
     @StateObject private var hinge = HingeMonitor()
+    @StateObject private var diagnostics = HologramDiagnostics()
+    /// 計測パネルの表示（三本指タップで開閉）
+    @State private var showDebugPanel = false
 
     /// 状態ラベル。ヒンジ角度が取れていれば併記する（取れなければ全開 180° 扱い）
     private var statusLine: String {
@@ -22,7 +25,8 @@ struct HologramView: View {
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            HologramSceneView(tracker: tracker, hinge: hinge)
+            HologramSceneView(tracker: tracker, hinge: hinge, diagnostics: diagnostics,
+                              onThreeFingerTap: { showDebugPanel.toggle() })
                 .ignoresSafeArea()
 
             // 状態ラベル（顔トラッキング中か、ドラッグ操作かが分かる）
@@ -43,6 +47,13 @@ struct HologramView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .allowsHitTesting(false)
+
+            // 計測パネル（三本指タップで開閉）
+            if showDebugPanel {
+                HologramDebugPanel(hinge: hinge, diagnostics: diagnostics,
+                                   onClose: { showDebugPanel = false })
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
 
             // 本番 RootView と同じ見た目の戻るボタン
             Button(action: onExit) {
