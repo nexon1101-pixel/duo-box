@@ -634,7 +634,20 @@ final class HologramRig {
 
     // MARK: - 毎フレーム
 
-    /// 視点・折り角度を平滑化し、床の枠と2つのカメラの投影を更新する。上半分の view の描画前に1回だけ呼ぶ。
+    /// 手順6：両画面で同じフレーム状態を使うための入り口。
+    /// 同じ時刻の呼び出しは最初の1回だけ計算し、もう一方の view はその結果をそのまま描く
+    private var lastComputedTime: TimeInterval = -1
+    private let frameLock = NSLock()
+    func updateForFrame(time: TimeInterval) {
+        frameLock.lock()
+        if time != lastComputedTime {
+            lastComputedTime = time
+            update(time: time)
+        }
+        frameLock.unlock()
+    }
+
+    /// 視点・折り角度を平滑化し、床の枠と2つのカメラの投影を更新する。
     func update(time: TimeInterval) {
         let dt = lastTime == 0 ? 1.0 / 60 : min(time - lastTime, 0.1)
         lastTime = time
@@ -949,8 +962,9 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
             view.isUserInteractionEnabled = false
             addSubview(view)
         }
-        // 投影の更新は上半分の view の描画前に1回だけ行い、下半分は同じ結果を使う
+        // 投影の更新は両 view の描画前に呼ぶ。同じ時刻では1回だけ計算され、両画面が同じ状態を描く（手順6）
         upperView.delegate = self
+        lowerView.delegate = self
 
         // 顔トラッキングが使えないときのドラッグ操作
         addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:))))
@@ -1008,7 +1022,7 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
     }
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        rig.update(time: time)
+        rig.updateForFrame(time: time)
         // 目が下パネルの裏側に回って投影が成り立たないときは、ゆがんだ絵を出さず下のビューを隠す
         let ok = rig.lowerValid
         if ok != lastLowerOK {
