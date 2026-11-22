@@ -136,10 +136,15 @@ final class HologramRig {
             for child in Array(modelScene.rootNode.childNodes) { wrap.addChildNode(child) }
             // モデルの実寸（約1.53m）を目標の高さへ縮小し、足元が原点に来るようそろえる
             let (minB, maxB) = wrap.boundingBox
-            let h = max(maxB.y - minB.y, 0.001)
-            let s = charH / h
+            let h = max(maxB.y - minB.y, Float(0.001))
+            let s = Float(charH) / h
             wrap.scale = SCNVector3(s, s, s)
             wrap.position = SCNVector3(-minB.x * s, -minB.y * s, -minB.z * s)
+            // USDZ の PBR のままだと陰影が灰色っぽく沈むので、全マテリアルを
+            // テクスチャ色そのままの無陰影（.constant）にしてアニメ塗りの色を出す
+            wrap.enumerateChildNodes { node, _ in
+                node.geometry?.materials.forEach { $0.lightingModel = .constant }
+            }
             characterNode.addChildNode(wrap)
         } else {
             // モデルが読めないときの保険（従来の1枚絵プレーン）
