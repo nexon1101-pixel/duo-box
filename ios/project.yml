@@ -15,7 +15,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.30.0"
-    CURRENT_PROJECT_VERSION: "74"
+    CURRENT_PROJECT_VERSION: "75"
 targets:
   DuoBox:
     type: application
@@ -67,6 +67,7 @@ targets:
       path: DuoBoxDebug/Info.plist
       properties:
         CFBundleDisplayName: DuoBox Sandbox
+        NSCameraUsageDescription: 顔の位置を見て、箱の中の見え方を変えるためにカメラを使います
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
