@@ -124,6 +124,9 @@ final class HologramRig {
     private var smoothedAngle: Float = .pi     // 全開 180° から始める
     private var lastTime: TimeInterval = 0
     private var eyeInitialized = false
+    /// 顔ロスト時の保持用：最後に顔で決まった目の目標と、ロストが始まった時刻
+    private var lastFaceTarget: SIMD3<Float>?
+    private var faceLostSince: TimeInterval?
 
     /// 下パネルの投影が成り立っているか（目が裏側に回ると false）。描画スレッドで更新
     private(set) var lowerValid = true
@@ -611,6 +614,20 @@ final class HologramRig {
             // ホーム基準と視差ゲインは廃止。目の絶対位置のずれは機種プロファイル側で吸収する。
             let camOffset = SIMD3<Float>(profile.cameraRight, upperH + profile.cameraAboveTopEdge, 0)
             target = camOffset + tracker.mappedHead
+            lastFaceTarget = target
+            faceLostSince = nil
+        } else if let last = lastFaceTarget {
+            // 顔が見えなくなったら基準へ即座に戻さず、最後の位置を 1.5 秒保ち、
+            // その後 2.5 秒かけて基準の目の位置へゆっくり戻す。戻り切ったら保持を解く。
+            if faceLostSince == nil { faceLostSince = time }
+            let lost = time - (faceLostSince ?? time)
+            if lost <= 1.5 {
+                target = last + SIMD3<Float>(manual.x, manual.y, 0)
+            } else {
+                let f = min(Float((lost - 1.5) / 2.5), 1)
+                target = nominalEye + (last - nominalEye) * (1 - f) + SIMD3<Float>(manual.x, manual.y, 0)
+                if f >= 1 { lastFaceTarget = nil; faceLostSince = nil }
+            }
         } else {
             target = nominalEye + SIMD3<Float>(manual.x, manual.y, 0)
         }

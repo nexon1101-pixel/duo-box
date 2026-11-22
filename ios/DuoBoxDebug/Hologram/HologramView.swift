@@ -23,11 +23,26 @@ struct HologramView: View {
         return "\(line)｜ヒンジ角度なし（全開扱い）"
     }
 
+    /// 画面が閉じ気味（60°未満）ならホログラムは動かさず、開くよう促す。角度が取れなければ開いている扱い
+    private var needsOpen: Bool {
+        guard let deg = hinge.angleDegrees else { return false }
+        return deg < 60
+    }
+
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            HologramSceneView(tracker: tracker, hinge: hinge, diagnostics: diagnostics,
-                              onThreeFingerTap: { showDebugPanel.toggle() })
-                .ignoresSafeArea()
+            if needsOpen {
+                Color.black
+                    .ignoresSafeArea()
+                Text("画面を開いてください")
+                    .font(.title3.bold())
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            } else {
+                HologramSceneView(tracker: tracker, hinge: hinge, diagnostics: diagnostics,
+                                  onThreeFingerTap: { showDebugPanel.toggle() })
+                    .ignoresSafeArea()
+            }
 
             // 状態ラベル（顔トラッキング中か、ドラッグ操作かが分かる）
             VStack {
