@@ -61,7 +61,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.duoremote.app.debug
         # Sandbox のビルド番号（ホログラム改善計画のパス番号に合わせて上げる。本番 DuoBox は共通設定の値のまま）
-        CURRENT_PROJECT_VERSION: "98"
+        CURRENT_PROJECT_VERSION: "99"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: NO

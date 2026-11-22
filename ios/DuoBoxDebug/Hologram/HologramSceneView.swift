@@ -140,6 +140,7 @@ final class HologramRig {
     private let floorShade = SCNNode()
     private var particles: [(node: SCNNode, base: SIMD3<Float>, phase: Float)] = []
     private var markerNodes: [SCNNode] = []   // 位置合わせマーカー（rebuildWorld で作り直す）
+    private var upperEdgeMarkers: [(node: SCNNode, atTop: Bool)] = []   // 上パネルの上端・折り目側の端の印（毎フレーム y を合わせる）
     // 格子：部屋の角を原点に gridStep 間隔で引く細線。位置は update() で毎フレーム角に合わせる
     private let gridStep: Float = 0.02
     private var gridWallH: [(node: SCNNode, k: Float)] = []
@@ -193,6 +194,8 @@ final class HologramRig {
 
     private var eyeFilter = OneEuro3()
     private var smoothedAngle: Float = .pi     // 全開 180° から始める
+    /// ヒンジ軸から上下パネルの折り目側の端までの距離 G/2（m）。update の頭で折り角から決める
+    private var foldHalfGap: Float = 0
     private var lastTime: TimeInterval = 0
     /// 顔ロスト時の保持用：最後に顔で決まった目の目標と、ロストが始まった時刻
     private var lastFaceTarget: SIMD3<Float>?
@@ -232,6 +235,7 @@ final class HologramRig {
         var marginsMM: [Float] = []
         var pMax: Float = 1.6             // p の上限（床の角）
         var effectiveRecessMM: Float = 30 // 折り角で畳んだ後の実効の壁の下げ量（mm）
+        var foldGapMM: Float = 0          // 折り目の離れの合計 G（mm）
         var materialFound = 0
         var materialTotal = 0
     }
@@ -281,13 +285,13 @@ final class HologramRig {
     /// th = π で d = (0,-1,0)（上パネルと同一平面）、th = π/2 で d = (0,0,1)（手前へ倒れた L 字）。
     private func lowerPlane(angle th: Float) -> (d: SIMD3<Float>, center: SIMD3<Float>, up: SIMD3<Float>, normal: SIMD3<Float>) {
         let d = SIMD3<Float>(0, cos(th), sin(th))
-        // 下パネルの面はヒンジ軸を通り、表示領域は軸から hingeToLowerEdge 先から始まる
-        return (d, d * (profile.hingeToLowerEdge + lowerH / 2), -d, SIMD3<Float>(0, sin(th), -cos(th)))
+        // 下パネルの面はヒンジ軸を通り、表示領域は軸から foldHalfGap 先から始まる
+        return (d, d * (foldHalfGap + lowerH / 2), -d, SIMD3<Float>(0, sin(th), -cos(th)))
     }
 
-    /// カメラの位置（上パネル座標、折り目原点・上向き正）。カメラは上パネルの内側にある
+    /// カメラの位置（上パネル座標、ヒンジ軸原点・上向き正）。カメラは上パネルの内側にあり、上端は軸から foldHalfGap + upperH
     private var cameraPosition: SIMD3<Float> {
-        SIMD3<Float>(profile.cameraRight, upperH - profile.cameraBelowTop, 0)
+        SIMD3<Float>(profile.cameraRight, foldHalfGap + upperH - profile.cameraBelowTop, 0)
     }
 
     /// 基準の目の位置（上パネル座標）。カメラの少し上、30〜40cm 手前を想定
@@ -306,7 +310,7 @@ final class HologramRig {
         let dz = E.z - P.z
         if dz > 1e-6 {
             let q = E + (P - E) * (E.z / dz)              // 上パネル面（z=0）との交点
-            if q.y >= 0 { upper = min(upperH - q.y, q.x + width / 2, width / 2 - q.x) }
+            if q.y >= foldHalfGap { upper = min(foldHalfGap + upperH - q.y, q.x + width / 2, width / 2 - q.x) }
         }
         var lower: Float? = nil
         let denom = simd_dot(P - E, n)
@@ -315,7 +319,7 @@ final class HologramRig {
             if t > 0 {
                 let q = E + (P - E) * t                   // 下パネル面との交点
                 let v = simd_dot(q, d)                    // ヒンジ軸からの距離
-                let edge = profile.hingeToLowerEdge       // 下パネルの表示はここから始まる
+                let edge = foldHalfGap                    // 下パネルの表示はここから始まる
                 if v >= edge { lower = min(edge + lowerH - v, q.x + width / 2, width / 2 - q.x) }
             }
         }
@@ -392,6 +396,7 @@ final class HologramRig {
         standNode.childNodes.forEach { $0.removeFromParentNode() }
         floorLines.removeAll()
         markerNodes.removeAll()
+        upperEdgeMarkers.removeAll()
         gridWallH.removeAll(); gridWallV.removeAll(); gridFloorH.removeAll(); gridFloorV.removeAll()
         let w = CGFloat(width)
 
@@ -507,13 +512,16 @@ final class HologramRig {
             let top = marker(.cyan)              // 上パネルの角
             top.simdPosition = SIMD3(x, upperH, 0.0012)
             worldNode.addChildNode(top)
+            upperEdgeMarkers.append((top, true))
             let fold = marker(.yellow)           // 折り目の端
             fold.simdPosition = SIMD3(x, 0, 0.0012)
             worldNode.addChildNode(fold)
+            upperEdgeMarkers.append((fold, false))
         }
         let foldCenter = marker(.yellow)         // 折り目の中央（上下の段差チェック用）
         foldCenter.simdPosition = SIMD3(0, 0, 0.0012)
         worldNode.addChildNode(foldCenter)
+        upperEdgeMarkers.append((foldCenter, false))
 
         // 格子：床と壁に 20mm 間隔の細線。部屋の角を原点にするので、折り目で床と壁の線がつながる。
         // 位置と長さは折り角と wallRecess で変わるため、update() で毎フレーム合わせる（ここでは形だけ作る）
@@ -717,11 +725,13 @@ final class HologramRig {
     /// 手順6：両画面で同じフレーム状態を使うための入り口。
     /// 同じ時刻の呼び出しは最初の1回だけ計算し、もう一方の view はその結果をそのまま描く
     private var lastComputedTime: TimeInterval = -1
+    /// この秒数より近い時刻は同じフレームとみなす（上下の view で渡る時刻の微妙な差を吸収する）
+    static let sameFrameWindow: TimeInterval = 0.004
     private let frameLock = NSLock()
     private var lastCameraCheck: TimeInterval = -1
     func updateForFrame(time: TimeInterval) {
         frameLock.lock()
-        if time != lastComputedTime {
+        if abs(time - lastComputedTime) >= Self.sameFrameWindow {
             lastComputedTime = time
             update(time: time)
         }
@@ -736,6 +746,13 @@ final class HologramRig {
         return true
     }
 
+    /// 先読みのずれ量の長さの上限（m）。顔の再検出で速度が跳ねたときの行き過ぎを抑える
+    static let predictionMaxOffset: Float = 0.010
+    private static func clampedLead(_ lead: SIMD3<Float>) -> SIMD3<Float> {
+        let len = simd_length(lead)
+        return len > predictionMaxOffset ? lead * (predictionMaxOffset / len) : lead
+    }
+
     /// 視点・折り角度を平滑化し、床の枠と2つのカメラの投影を更新する。
     func update(time: TimeInterval) {
         // 寸法とプロファイルはフレーム冒頭で一度だけ取り込む。作り直しもここ（描画スレッド）でだけ行う
@@ -744,6 +761,16 @@ final class HologramRig {
         let dt = lastTime == 0 ? 1.0 / 60 : min(time - lastTime, 0.1)
         lastTime = time
         let k = Float(1 - exp(-dt * 12))
+
+        // 折り角度：取れなければ全開 180°（＝従来の単一平面）。ライブ更新に追従
+        let angleInput = hinge?.radians ?? .pi
+        if angleInput.isFinite {                    // 有限でない入力は捨てて前の角度を保つ
+            let angleTarget = Float(min(max(angleInput, .pi / 6), .pi))
+            smoothedAngle += (angleTarget - smoothedAngle) * k
+        }
+        let th = smoothedAngle
+        // 折り目の離れ：カメラ位置（＝目の位置）が上パネルの端に依存するので、目の計算より先に決める
+        foldHalfGap = HologramDeviceProfile.hingeToPanelEdge(angleDeg: Double(th) * 180 / .pi)
 
         // 目の位置（上パネル座標＝折り目が原点）。
         // 顔が見えていれば、カメラ相対の目の位置にカメラの位置（機種プロファイル）を足す。
@@ -778,19 +805,11 @@ final class HologramRig {
         lastValidTarget = target
         // 平滑化は 1€ フィルタ（手順5）。さらに速度×先読み時間だけ先の位置を出して表示までの遅れを埋める
         let filtered = eyeFilter.filter(target, dt: Float(dt), minCutoff: oeMinCutoff, beta: oeBeta, dCutoff: 1.0)
-        let predicted = filtered + eyeFilter.dxHat * oePred
+        let predicted = filtered + Self.clampedLead(eyeFilter.dxHat * oePred)
         let eye = SIMD3<Float>(predicted.x, predicted.y, max(predicted.z, 0.1))
 
-        // 折り角度：取れなければ全開 180°（＝従来の単一平面）。ライブ更新に追従
-        let angleInput = hinge?.radians ?? .pi
-        if angleInput.isFinite {                    // 有限でない入力は捨てて前の角度を保つ
-            let angleTarget = Float(min(max(angleInput, .pi / 6), .pi))
-            smoothedAngle += (angleTarget - smoothedAngle) * k
-        }
-        let th = smoothedAngle
-
         let lower = lowerPlane(angle: th)
-        let lowerEdge = profile.hingeToLowerEdge    // ヒンジ軸から下パネルの折り目側の端まで
+        let lowerEdge = foldHalfGap                 // ヒンジ軸から下パネルの折り目側の端まで
         let frameZ0 = lowerEdge + lowerH / 2        // floorFrame の原点（下パネル中央）のヒンジ軸からの距離
 
         // 床の枠：下パネルの面に合わせる（x=右、y=法線、z=端へ向かう向き。右手系）。原点は下パネルの中央
@@ -798,11 +817,12 @@ final class HologramRig {
             SIMD4(1, 0, 0, 0), SIMD4(lower.normal, 0), SIMD4(lower.d, 0), SIMD4(lower.center, 1)))
 
         // 床と壁の交線（部屋の角）。実効の下げ量が 0 なら折り目そのもの。
+        // 上下パネルは自分の面の中で軸から離れるだけで面は軸を通るので、角は G によらず両面の交線のまま（壁と床が離れない）。
         // 以降の角・壁・床・格子・幅木・壁の枠・p の上限はすべてこの実効値から求める
         let recess = Self.effectiveRecess(wallRecess, angleDeg: th * 180 / .pi)
         let sC = -recess / max(sin(th), 0.2)        // 角の位置（折り目から d 方向への距離。負＝折り目の奥側）
         let yC = cos(th) * sC                       // 角の高さ（上パネル座標）
-        let wallH = max(upperH + 0.3 - yC, 0.01)
+        let wallH = max(foldHalfGap + upperH + 0.3 - yC, 0.01)
         wallNode.simdPosition = SIMD3(0, yC + wallH / 2, -recess)
         wallNode.simdScale = SIMD3(1, wallH, 1)
         wallShade.simdPosition = SIMD3(0, yC + 0.015, -recess + 0.0003)
@@ -837,12 +857,13 @@ final class HologramRig {
         for l in floorLines {
             l.node.simdPosition = SIMD3(0, 0.0002, sC - frameZ0 + l.frac * floorDepth)
         }
-        let frameBottom = yC + max(upperH * 0.06, 0.006)
+        let frameBottom = yC + foldHalfGap + max(upperH * 0.06, 0.006)   // 壁の枠は上パネルに合わせて動かす
         wallFrameNode.simdPosition = SIMD3(0, frameBottom + wallFrameH / 2, -recess + 0.0005)
 
         // 位置合わせマーカーの表示切り替え（パネルのトグル）
         let sm = showMarkers
         for n in markerNodes where n.isHidden == sm { n.isHidden = !sm }
+        for m in upperEdgeMarkers { m.node.simdPosition.y = foldHalfGap + (m.atTop ? upperH : 0) }
 
         // 格子：部屋の角（壁側は yC、床側は sC）を原点に等間隔で並べる。角を共有するので折り目でつながる
         let gs = showGrid
@@ -890,9 +911,9 @@ final class HologramRig {
         idleNode.simdScale = SIMD3(hs, hs, hs)
         padNode.simdScale = SIMD3(hs, 1, hs)   // 台座の半径も身長に連動（厚みは変えない）
 
-        // 上パネル：中心 (0, upperH/2, 0)、右 +x、上 +y
+        // 上パネル：中心 (0, foldHalfGap + upperH/2, 0)、右 +x、上 +y
         _ = setProjection(camera: upperCamera, eye: eye,
-                          center: SIMD3(0, upperH / 2, 0),
+                          center: SIMD3(0, foldHalfGap + upperH / 2, 0),
                           right: SIMD3(1, 0, 0), up: SIMD3(0, 1, 0),
                           halfW: width / 2, halfH: upperH / 2)
         // 下パネル：同じ目・同じ世界座標系・同じ関数。上は折り目へ向かう向き（-d）
@@ -944,6 +965,7 @@ final class HologramRig {
                          lowerValid: lowerValid,
                          marginsMM: marginsMM, pMax: pMax,
                          effectiveRecessMM: recess * 1000,
+                         foldGapMM: foldHalfGap * 2 * 1000,
                          materialFound: materialFound, materialTotal: materialTotal)
         snapLock.unlock()
     }

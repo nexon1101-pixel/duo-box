@@ -3,13 +3,22 @@ import UIKit
 /// iPhone Duo の「画面の実寸」と「内側カメラの位置」。
 ///
 /// 実寸の出どころ（依頼者調べ）：開いた内側画面 157.7×110.9mm、951×669pt、1pt＝0.166mm。
-/// ノート型の上下パネルは各 約111mm（幅）×79mm（高さ）。折り目で上下の表示領域が離れる距離は約8mm。
+/// ノート型の上下パネルは各 約111mm（幅）×79mm（高さ）。折り目の離れは折り角で変わる（foldGapMM(angleDeg:)）。
 /// 内側カメラは画面内（上辺の中央寄り）で公開の mm 値がないため、UIKit の reserved region（.occlusion）から読む。
 struct HologramDeviceProfile: Equatable {
     /// 1pt の実寸（mm）。依頼者調べの iPhone Duo 実寸
     static let mmPerPoint: Double = 0.166
-    /// 折り目で上下の表示領域が離れる距離（mm）。ヒンジ軸の両側に半分ずつとして扱う
-    static let foldGapMM: Double = 8
+    /// 折り目で上下の表示領域が離れる距離の上限（mm）。
+    /// 実機で決めるための定数。根拠は曲げ部分の最大幅の記事値
+    static let foldGapMaxMM: Double = 3.85
+    /// 折り角（度）に対する離れの合計 G（mm）。180°で 0、90°以下で上限
+    static func foldGapMM(angleDeg: Double) -> Double {
+        foldGapMaxMM * min(max((180 - angleDeg) / 90, 0), 1)
+    }
+    /// ヒンジ軸から上下パネルそれぞれの折り目側の端までの距離（メートル）。G を半分ずつ振り分ける
+    static func hingeToPanelEdge(angleDeg: Double) -> Float {
+        Float(foldGapMM(angleDeg: angleDeg) / 2 / 1000)
+    }
     /// occlusion が取れないときのカメラ位置：上パネルの上端から下へ 4mm、横中央
     static let defaultCameraBelowTopMM: Double = 4
     static let defaultCameraRightMM: Double = 0
@@ -36,8 +45,6 @@ struct HologramDeviceProfile: Equatable {
     /// カメラの位置（メートル）
     var cameraBelowTop: Float { Float(cameraBelowTopMM / 1000) }
     var cameraRight: Float { Float(cameraRightMM / 1000) }
-    /// ヒンジ軸から下パネルの折り目側の端までの距離（メートル）
-    var hingeToLowerEdge: Float { Float(Self.foldGapMM / 2 / 1000) }
     /// 1pt が何メートルか
     var metersPerPoint: Float { Float(Self.mmPerPoint / 1000) }
 

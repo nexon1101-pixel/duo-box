@@ -8,6 +8,12 @@ struct HologramView: View {
     @StateObject private var diagnostics = HologramDiagnostics()
     /// 計測パネルの表示（三本指タップで開閉）
     @State private var showDebugPanel = false
+    /// 「画面を開いてください」の表示中か（ヒステリシスのため状態で持つ）
+    @State private var needsOpen = false
+
+    /// この角度未満で「画面を開いてください」を出し、この角度以上で消す。間は前の状態を保つ
+    private static let openPromptShowBelowDeg: Double = 60
+    private static let openPromptHideAtDeg: Double = 70
 
     /// 状態ラベル。ヒンジ角度が取れていれば併記する（取れなければ全開 180° 扱い）
     private var statusLine: String {
@@ -23,14 +29,21 @@ struct HologramView: View {
         return "\(line)｜ヒンジ角度なし（全開扱い）"
     }
 
-    /// 画面が閉じ気味（60°未満）ならホログラムは動かさず、開くよう促す。角度が取れなければ開いている扱い
-    private var needsOpen: Bool {
-        guard let deg = hinge.angleDegrees else { return false }
-        return deg < 60
+    /// 次の表示状態。角度が取れなければ開いている扱い（出さない）
+    private static func nextNeedsOpen(current: Bool, angleDeg: Double?) -> Bool {
+        guard let deg = angleDeg else { return false }
+        if deg < openPromptShowBelowDeg { return true }
+        if deg >= openPromptHideAtDeg { return false }
+        return current
     }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
+            // シーンは常時マウントしたまま（作り直すとモデル約41MBの読み直しになる）
+            HologramSceneView(tracker: tracker, hinge: hinge, diagnostics: diagnostics,
+                              onThreeFingerTap: { showDebugPanel.toggle() })
+                .ignoresSafeArea()
+
             if needsOpen {
                 Color.black
                     .ignoresSafeArea()
@@ -38,10 +51,6 @@ struct HologramView: View {
                     .font(.title3.bold())
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            } else {
-                HologramSceneView(tracker: tracker, hinge: hinge, diagnostics: diagnostics,
-                                  onThreeFingerTap: { showDebugPanel.toggle() })
-                    .ignoresSafeArea()
             }
 
             // 状態ラベル（顔トラッキング中か、ドラッグ操作かが分かる）
@@ -86,5 +95,9 @@ struct HologramView: View {
         }
         .onAppear { tracker.start() }
         .onDisappear { tracker.stop() }
+        .onReceive(hinge.$angleDegrees) { deg in
+            let next = Self.nextNeedsOpen(current: needsOpen, angleDeg: deg)
+            if next != needsOpen { needsOpen = next }
+        }
     }
 }

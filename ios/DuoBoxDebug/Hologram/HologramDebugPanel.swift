@@ -241,6 +241,7 @@ struct HologramDebugPanel: View {
                     row("台座が下画面に乗る割合", String(format: "%.0f %%", s.padPct))
                     row("目の位置(上パネル座標)", String(format: "x%.0f y%.0f z%.0f mm", s.eye.x * 1000, s.eye.y * 1000, s.eye.z * 1000))
                     row("折り角度", "\(fmt(CGFloat(s.angleDeg)))°")
+                    row("折り目の離れ（mm）", String(format: "%.2f", s.foldGapMM))
                     row("目の床からの高さ", "\(fmt(CGFloat(s.lowerEyeHeightMM))) mm")
                     row("下ビューの投影", s.lowerValid ? "有効" : "無効（目が床の裏側）")
                 }
