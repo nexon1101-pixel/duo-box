@@ -27,6 +27,167 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     var head: SIMD3<Float> { lock.lock(); defer { lock.unlock() }; return _head }
     var faceActive: Bool { lock.lock(); defer { lock.unlock() }; return _faceActive }
 
+    // MARK: - キャリブレーション（軸対応・ホーム位置・視差ゲイン）
+    // 生の目位置 raw = (x, y, dist)（メートル、`head` と同じ）から、シーン座標への変換はこのクラスの出力段に一元化する。
+    //   シーン側の目の位置 = 基準の目位置 + gain × (map(raw) − map(home))
+    // gain はホームからの相対移動にだけ掛かる（絶対位置には掛けない）。
+
+    /// 生座標→シーン座標の軸対応。sceneX = xSign × raw[xAxis]、sceneY = ySign × raw[yAxis]（軸 0=x, 1=y, 2=z）。z は常に raw の距離。
+    struct AxisMap: Equatable {
+        var xAxis = 0, xSign: Float = 1
+        var yAxis = 1, ySign: Float = 1
+        static let identity = AxisMap()
+        /// ピッカー用の番号（0..5 = +x, −x, +y, −y, +z, −z）
+        static func code(axis: Int, sign: Float) -> Int { axis * 2 + (sign < 0 ? 1 : 0) }
+        static func decode(_ c: Int) -> (axis: Int, sign: Float) { (min(max(c / 2, 0), 2), c % 2 == 0 ? 1 : -1) }
+        static let labels = ["+x", "−x", "+y", "−y", "+z", "−z"]
+        func apply(_ r: SIMD3<Float>) -> SIMD3<Float> {
+            SIMD3<Float>(xSign * r[xAxis], ySign * r[yAxis], r.z)
+        }
+    }
+
+    static let gainRange: ClosedRange<Float> = 0.6...1.3
+    private enum Key {
+        static let axis = "hologram.calib.axis"      // [xAxis, xSign, yAxis, ySign]
+        static let home = "hologram.calib.homeRaw"   // [x, y, z]
+        static let gain = "hologram.calib.gain"
+    }
+
+    /// UI 用（メインスレッドで更新）。描画スレッドは lock 内の _axisMap / _homeRaw / _gain を読む。
+    @Published private(set) var axisMap = AxisMap.identity
+    @Published private(set) var homeRaw: SIMD3<Float>?
+    @Published private(set) var gain: Float = 1.0
+    /// 軸キャリブレーションの進行
+    enum AxisStep: Equatable { case idle, front, left, up, done }
+    @Published private(set) var axisStep: AxisStep = .idle
+    @Published private(set) var calibMessage = ""
+
+    private var _axisMap = AxisMap.identity
+    private var _homeRaw: SIMD3<Float>?
+    private var _gain: Float = 1.0
+    private var recent: [SIMD3<Float>] = []          // 直近の生サンプル（静止位置の平均用）
+    private var frontRaw: SIMD3<Float>?
+    private var leftAxis = 0
+
+    /// 起動時に保存値を復元する（init から）
+    private func loadCalibration() {
+        let d = UserDefaults.standard
+        if let a = d.array(forKey: Key.axis) as? [Double], a.count == 4 {
+            _axisMap = AxisMap(xAxis: min(max(Int(a[0]), 0), 2), xSign: a[1] < 0 ? -1 : 1,
+                               yAxis: min(max(Int(a[2]), 0), 2), ySign: a[3] < 0 ? -1 : 1)
+        }
+        if let h = d.array(forKey: Key.home) as? [Double], h.count == 3 {
+            _homeRaw = SIMD3<Float>(Float(h[0]), Float(h[1]), Float(h[2]))
+        }
+        if d.object(forKey: Key.gain) != nil {
+            _gain = min(max(Float(d.double(forKey: Key.gain)), Self.gainRange.lowerBound), Self.gainRange.upperBound)
+        }
+        axisMap = _axisMap; homeRaw = _homeRaw; gain = _gain
+    }
+
+    override init() {
+        super.init()
+        loadCalibration()
+    }
+
+    private func saveAxisMap() {
+        let m = _axisMap
+        UserDefaults.standard.set([Double(m.xAxis), Double(m.xSign), Double(m.yAxis), Double(m.ySign)], forKey: Key.axis)
+    }
+
+    /// 手動で軸対応を選び直す（自動判定が外れた場合用）
+    func setAxisMap(_ m: AxisMap) {
+        lock.lock(); _axisMap = m; lock.unlock()
+        axisMap = m
+        saveAxisMap()
+    }
+
+    func setGain(_ g: Float) {
+        let v = min(max(g, Self.gainRange.lowerBound), Self.gainRange.upperBound)
+        lock.lock(); _gain = v; lock.unlock()
+        gain = v
+        UserDefaults.standard.set(Double(v), forKey: Key.gain)
+    }
+
+    /// 直近サンプルの平均（静止位置）。顔が見えていなければ nil
+    private func stillPosition() -> SIMD3<Float>? {
+        lock.lock(); defer { lock.unlock() }
+        guard _faceActive, !recent.isEmpty else { return nil }
+        return recent.reduce(SIMD3<Float>(repeating: 0), +) / Float(recent.count)
+    }
+
+    /// ホーム位置：今の目位置を記録する
+    func recordHome() {
+        guard let p = stillPosition() else { calibMessage = "顔が見えていません。カメラの方を向いてください"; return }
+        lock.lock(); _homeRaw = p; lock.unlock()
+        homeRaw = p
+        UserDefaults.standard.set([Double(p.x), Double(p.y), Double(p.z)], forKey: Key.home)
+        calibMessage = "ホームを記録しました"
+    }
+
+    func startAxisCalibration() {
+        frontRaw = nil
+        axisStep = .front
+        calibMessage = "① 普段どおり正面を見て静止し、「記録」を押す"
+    }
+
+    func cancelAxisCalibration() { axisStep = .idle; calibMessage = "" }
+
+    /// 軸キャリブレーションの現在の手順を記録して次へ進める
+    func captureAxisStep() {
+        guard let p = stillPosition() else { calibMessage = "顔が見えていません。カメラの方を向いてください"; return }
+        let minMove: Float = 0.015   // これ未満の動きは判定しない（1.5cm）
+        switch axisStep {
+        case .front:
+            frontRaw = p
+            axisStep = .left
+            calibMessage = "② 顔を左へ動かして静止し、「記録」を押す"
+        case .left:
+            guard let f = frontRaw else { startAxisCalibration(); return }
+            let d = p - f
+            let a = (0..<3).max { abs(d[$0]) < abs(d[$1]) } ?? 0
+            guard abs(d[a]) >= minMove else { calibMessage = "動きが小さすぎます。もっと大きく左へ動かして再度「記録」"; return }
+            leftAxis = a
+            var m = axisMap
+            m.xAxis = a
+            m.xSign = d[a] > 0 ? -1 : 1      // 左へ動いた＝シーンの −x。生値が増えたなら符号を反転
+            setAxisMap(m)
+            axisStep = .up
+            calibMessage = "③ 顔を上へ動かして静止し、「記録」を押す"
+        case .up:
+            guard let f = frontRaw else { startAxisCalibration(); return }
+            let d = p - f
+            // 左で使った軸は除く
+            let a = (0..<3).filter { $0 != leftAxis }.max { abs(d[$0]) < abs(d[$1]) } ?? 1
+            guard abs(d[a]) >= minMove else { calibMessage = "動きが小さすぎます。もっと大きく上へ動かして再度「記録」"; return }
+            var m = axisMap
+            m.yAxis = a
+            m.ySign = d[a] > 0 ? 1 : -1
+            setAxisMap(m)
+            axisStep = .done
+            calibMessage = "軸対応を決定しました。外れていれば下のセレクタで直せます"
+        default:
+            break
+        }
+    }
+
+    func resetCalibration() {
+        let d = UserDefaults.standard
+        d.removeObject(forKey: Key.axis); d.removeObject(forKey: Key.home); d.removeObject(forKey: Key.gain)
+        lock.lock(); _axisMap = .identity; _homeRaw = nil; _gain = 1.0; lock.unlock()
+        axisMap = .identity; homeRaw = nil; gain = 1.0
+        frontRaw = nil; axisStep = .idle; calibMessage = "キャリブレーションを既定に戻しました"
+    }
+
+    /// シーン側へ渡す、基準位置からの目の移動量（シーン座標、メートル）。
+    /// = gain × (map(raw) − map(home))。ホーム未記録なら defaultHomeMapped（変換後座標での既定の基準）を使う。
+    func sceneDelta(defaultHomeMapped: SIMD3<Float>) -> SIMD3<Float> {
+        lock.lock(); defer { lock.unlock() }
+        let cur = _axisMap.apply(_head)
+        let home = _homeRaw.map { _axisMap.apply($0) } ?? defaultHomeMapped
+        return (cur - home) * _gain
+    }
+
     /// 最後に顔を捉えてからの秒数。まだ一度も捉えていなければ nil。デバッグ表示用。
     var secondsSinceFace: Int? {
         lock.lock(); defer { lock.unlock() }
@@ -172,6 +333,8 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         let dist = min(max(abs(rel.z), 0.15), 0.9)
         lock.lock()
         _head = SIMD3<Float>(sx, sy, dist)
+        recent.append(_head)
+        if recent.count > 20 { recent.removeFirst(recent.count - 20) }
         _faceActive = true
         _lastFaceTime = CACurrentMediaTime()
         lock.unlock()

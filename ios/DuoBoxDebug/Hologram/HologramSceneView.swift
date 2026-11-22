@@ -367,8 +367,11 @@ final class HologramRig {
         // 見えていなければドラッグ（基準の目の位置からのずれ）。
         let target: SIMD3<Float>
         if let tracker, tracker.faceActive {
-            let h = tracker.head
-            target = SIMD3<Float>(profile.cameraRight + h.x, upperH + profile.cameraAboveTopEdge + h.y, h.z)
+            // 軸変換・ホーム基準・ゲインは HeadTracker 側に集約。ここは「基準の目位置（部屋の正面）＋相対移動」だけ。
+            // ホーム未記録のときの既定の基準：従来どおり「カメラ位置＋生の目位置」が基準の目位置になる点
+            let camOffset = SIMD3<Float>(profile.cameraRight, upperH + profile.cameraAboveTopEdge, 0)
+            let defaultHome = nominalEye - camOffset
+            target = nominalEye + tracker.sceneDelta(defaultHomeMapped: defaultHome)
         } else {
             target = nominalEye + SIMD3<Float>(manual.x, manual.y, 0)
         }
