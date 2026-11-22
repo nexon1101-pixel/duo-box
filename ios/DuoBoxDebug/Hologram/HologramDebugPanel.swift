@@ -6,11 +6,11 @@ import SwiftUI
 final class HologramDiagnostics: ObservableObject {
     /// 配置・描画の現在値を読むための参照（パネルが定期的に読む）
     weak var rig: HologramRig?
-    /// 調整値：壁を奥へ下げる量（mm、初期値 40）と、身長の倍率（検証用、初期値 1）
-    @Published var wallRecessMM: Double = 40
+    /// 調整値：壁を奥へ下げる量（mm、初期値 30）と、身長の倍率（検証用、初期値 1）
+    @Published var wallRecessMM: Double = 30
     @Published var heightScale: Double = 1
     /// 立ち位置（奥行き比）：0＝手前の端、1＝折り目（壁際）。既定 0.8＝折り目から床奥行きの20%手前
-    @Published var standDepth: Double = 0.8
+    @Published var pPos: Double = 0.5
     /// 位置合わせマーカーの表示
     @Published var showMarkers = false
     /// 格子（床と壁）の表示
@@ -134,15 +134,15 @@ struct HologramDebugPanel: View {
     private var roomSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("③ 部屋・配置").font(.subheadline.bold())
-            Text("壁を奥へ下げる量 wallRecess: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 40）")
+            Text("壁を奥へ下げる量 wallRecess: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 30）")
                 .font(.caption)
             Slider(value: $diagnostics.wallRecessMM, in: 0...100, step: 1)
             Text("身長の倍率（自動で決めた身長に掛かる）: ×\(String(format: "%.2f", diagnostics.heightScale))")
                 .font(.caption)
             Slider(value: $diagnostics.heightScale, in: 0.5...2, step: 0.05)
-            Text("立ち位置（奥行き比）: \(String(format: "%.2f", diagnostics.standDepth))（1＝折り目／壁際、既定 0.80）")
+            Text("前後位置 p: \(String(format: "%.2f", diagnostics.pPos))（0＝手前の端、1＝折り目、1超＝床の角まで、既定 0.5）")
                 .font(.caption)
-            Slider(value: $diagnostics.standDepth, in: 0.5...0.95, step: 0.01)
+            Slider(value: $diagnostics.pPos, in: 0...1.6, step: 0.01)
             Toggle("格子を表示（床と壁、20mm間隔）", isOn: $diagnostics.showGrid)
                 .font(.caption)
             TimelineView(.periodic(from: .now, by: 0.5)) { _ in
@@ -150,6 +150,8 @@ struct HologramDebugPanel: View {
                 VStack(alignment: .leading, spacing: 3) {
                     row("身長（実際）", "\(fmt(CGFloat(s.charHeightMM))) mm")
                     row("身長（自動の上限）", "\(fmt(CGFloat(s.autoHeightMM))) mm")
+                    row("前後位置 p（実際）", String(format: "%.2f", s.pEff))
+                    row("台座が下画面に乗る割合", String(format: "%.0f %%", s.padPct))
                     row("目の位置(上パネル座標)", String(format: "x%.0f y%.0f z%.0f mm", s.eye.x * 1000, s.eye.y * 1000, s.eye.z * 1000))
                     row("折り角度", "\(fmt(CGFloat(s.angleDeg)))°")
                     row("目の床からの高さ", "\(fmt(CGFloat(s.lowerEyeHeightMM))) mm")

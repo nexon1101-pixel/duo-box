@@ -40,13 +40,13 @@ final class HologramRig {
 
     // 調整値（メインスレッドで書き、描画スレッドで読む）
     private let tuneLock = NSLock()
-    private var _wallRecess: Float = 0.040  // 壁を奥へ下げる量（m、初期値 40mm。パネル側の初期値と一致させる）
+    private var _wallRecess: Float = 0.030  // 壁を奥へ下げる量（m、初期値 30mm。パネル側の初期値と一致させる）
     private var _heightScale: Float = 1     // 身長の倍率（検証用）
     func setWallRecess(_ v: Float) { tuneLock.lock(); _wallRecess = max(v, 0); tuneLock.unlock() }
     func setHeightScale(_ v: Float) { tuneLock.lock(); _heightScale = max(v, 0.1); tuneLock.unlock() }
-    private var _standDepth: Float = 0.8    // 立ち位置の奥行き比（0＝手前の端、1＝壁際）
-    func setStandDepth(_ v: Float) { tuneLock.lock(); _standDepth = min(max(v, 0.3), 0.98); tuneLock.unlock() }
-    private var standDepth: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _standDepth }
+    private var _pPos: Float = 0.5          // 前後位置 p（0＝下パネルの手前の端、1＝折り目、1超＝床の角まで）
+    func setPPos(_ v: Float) { tuneLock.lock(); _pPos = max(v, 0); tuneLock.unlock() }
+    private var pPos: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _pPos }
     private var _showMarkers = false        // 位置合わせマーカーの表示
     func setShowMarkers(_ v: Bool) { tuneLock.lock(); _showMarkers = v; tuneLock.unlock() }
     private var showMarkers: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _showMarkers }
@@ -106,6 +106,8 @@ final class HologramRig {
         var angleDeg: Float = 180
         var charHeightMM: Float = 0
         var autoHeightMM: Float = 0
+        var pEff: Float = 0.5
+        var padPct: Float = 100
         var lowerEyeHeightMM: Float = 0
         var lowerValid = true
     }
@@ -168,7 +170,7 @@ final class HologramRig {
     ///   (a) 立ち位置の床から上パネルの上端までの高さ（法線方向）の 70%
     ///   (b) 目の位置が箱（x ±5cm、y 3〜12cm、z 25〜40cm）のどこにあっても、
     ///       頭のてっぺんの投影が上パネルの上端より 10% 以上下に収まる高さ
-    /// 折り角・wallRecess・standDepth が変わると上限も変わるので、update() から毎フレーム呼ぶ。
+    /// 折り角・wallRecess・立ち位置が変わると上限も変わるので、update() から毎フレーム呼ぶ。
     private func autoCharHeight(stand S: SIMD3<Float>, normal n: SIMD3<Float>) -> Float {
         let spanCap = max(0.7 * (upperH - S.y) / max(n.y, 0.2), 0.02)
         // 目の箱のサンプル（角と代表点）
@@ -570,9 +572,12 @@ final class HologramRig {
         floorNode.simdScale = SIMD3(1, floorLen, 1)
         floorShade.simdPosition = SIMD3(0, 0.0003, sC + 0.015 - lowerH / 2)
 
-        // 立ち位置：角（sC）から手前の端までの床の奥行きに対し、standDepth（0＝手前、1＝壁際）の位置
+        // 立ち位置：p（0＝手前の端、1＝折り目、1超は床の角まで）を、折り目からの距離へ直して置く
         let floorDepth = max(lowerH - sC, 0.01)
-        standNode.simdPosition = SIMD3(0, 0, sC - lowerH / 2 + (1 - standDepth) * floorDepth)
+        let pMax = 1 + (-sC) / lowerH
+        let pEff = min(max(pPos, 0), pMax)
+        let distFold = (1 - pEff) * lowerH    // 折り目から手前方向への距離（負＝折り目より奥）
+        standNode.simdPosition = SIMD3(0, 0, distFold - lowerH / 2)
         // 部屋の手がかり：巾木・床のライン・壁の枠
         baseboardNode.simdPosition = SIMD3(0, yC + 0.002, -recess + 0.0004)
         for l in floorLines {
@@ -626,10 +631,23 @@ final class HologramRig {
 
         updateIdle(time: Float(time.truncatingRemainder(dividingBy: 3600)))
 
+        // 台座の円が下パネルの範囲に入っている割合（面積%）。幅方向は円が収まる前提で、折り目と手前端の2辺だけで計算する
+        let padR = baseCharHeight * hs * 0.32
+        let padPct: Float
+        if padR > 0.0005 {
+            func cap(_ r: Float, _ dist: Float) -> Float {   // 中心から dist 離れた直線の向こう側の欠け
+                if dist >= r { return 0 }
+                if dist <= -r { return .pi * r * r }
+                return r * r * acos(dist / r) - dist * sqrt(max(r * r - dist * dist, 0))
+            }
+            padPct = (1 - (cap(padR, distFold) + cap(padR, lowerH - distFold)) / (.pi * padR * padR)) * 100
+        } else { padPct = (distFold >= 0 && distFold <= lowerH) ? 100 : 0 }
+
         snapLock.lock()
         _snap = Snapshot(eye: eye, angleDeg: th * 180 / .pi,
                          charHeightMM: baseCharHeight * hs * 1000,
                          autoHeightMM: autoH * 1000,
+                         pEff: pEff, padPct: padPct,
                          lowerEyeHeightMM: simd_dot(eye - lower.center, lower.normal) * 1000,
                          lowerValid: lowerValid)
         snapLock.unlock()
@@ -711,7 +729,7 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
             cancellables.removeAll()
             diagnostics.$wallRecessMM.sink { [weak self] v in self?.rig.setWallRecess(Float(v) / 1000) }
                 .store(in: &cancellables)
-            diagnostics.$standDepth.sink { [weak self] v in self?.rig.setStandDepth(Float(v)) }
+            diagnostics.$pPos.sink { [weak self] v in self?.rig.setPPos(Float(v)) }
                 .store(in: &cancellables)
             diagnostics.$heightScale.sink { [weak self] v in self?.rig.setHeightScale(Float(v)) }
                 .store(in: &cancellables)
