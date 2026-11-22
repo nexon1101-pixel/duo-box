@@ -205,6 +205,11 @@ struct HologramDebugPanel: View {
             Text("壁を奥へ下げる量 wallRecess: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 30）")
                 .font(.caption)
             Slider(value: $diagnostics.wallRecessMM, in: 0...100, step: 1)
+            TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                let effective = diagnostics.rig?.snapshot.effectiveRecessMM ?? Float(diagnostics.wallRecessMM)
+                row("実効（mm）", String(format: "%.1f", effective))
+                    .font(.system(.footnote, design: .monospaced))
+            }
             Text("身長の倍率（自動で決めた身長に掛かる）: ×\(String(format: "%.2f", diagnostics.heightScale))")
                 .font(.caption)
             Slider(value: $diagnostics.heightScale, in: 0.5...2, step: 0.05)

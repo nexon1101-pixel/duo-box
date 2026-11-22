@@ -59,6 +59,16 @@ final class HologramRig {
 
     // 調整値（メインスレッドで書き、描画スレッドで読む）
     private let tuneLock = NSLock()
+    // 全開付近で部屋の角を畳む範囲（度）。実機で見て変えるための定数（パネルのスライダーにはしない）。
+    // 開始角以下は wallRecess のまま、終了角以上は 0、その間は smoothstep でつなぐ
+    static let cornerFadeStartDeg: Float = 130
+    static let cornerFadeEndDeg: Float = 180
+    /// 折り角に応じた実効の壁の下げ量（m）
+    static func effectiveRecess(_ recess: Float, angleDeg: Float) -> Float {
+        guard cornerFadeEndDeg > cornerFadeStartDeg else { return angleDeg >= cornerFadeEndDeg ? 0 : recess }
+        let t = min(max((angleDeg - cornerFadeStartDeg) / (cornerFadeEndDeg - cornerFadeStartDeg), 0), 1)
+        return recess * (1 - t * t * (3 - 2 * t))
+    }
     private var _wallRecess: Float = 0.030  // 壁を奥へ下げる量（m、初期値 30mm。パネル側の初期値と一致させる）
     private var _heightScale: Float = 1     // 身長の倍率（検証用）
     func setWallRecess(_ v: Float) { tuneLock.lock(); _wallRecess = max(v, 0); tuneLock.unlock() }
@@ -221,6 +231,7 @@ final class HologramRig {
         /// 点ごとに数えられる窓のうち大きい方（windowMargin）を取り、グループ内で最小。どの窓でも数えられなければ NaN
         var marginsMM: [Float] = []
         var pMax: Float = 1.6             // p の上限（床の角）
+        var effectiveRecessMM: Float = 30 // 折り角で畳んだ後の実効の壁の下げ量（mm）
         var materialFound = 0
         var materialTotal = 0
     }
@@ -786,8 +797,9 @@ final class HologramRig {
         floorFrame.simdTransform = simd_float4x4(columns: (
             SIMD4(1, 0, 0, 0), SIMD4(lower.normal, 0), SIMD4(lower.d, 0), SIMD4(lower.center, 1)))
 
-        // 床と壁の交線（部屋の角）。wallRecess = 0 なら折り目そのもの
-        let recess = wallRecess
+        // 床と壁の交線（部屋の角）。実効の下げ量が 0 なら折り目そのもの。
+        // 以降の角・壁・床・格子・幅木・壁の枠・p の上限はすべてこの実効値から求める
+        let recess = Self.effectiveRecess(wallRecess, angleDeg: th * 180 / .pi)
         let sC = -recess / max(sin(th), 0.2)        // 角の位置（折り目から d 方向への距離。負＝折り目の奥側）
         let yC = cos(th) * sC                       // 角の高さ（上パネル座標）
         let wallH = max(upperH + 0.3 - yC, 0.01)
@@ -931,6 +943,7 @@ final class HologramRig {
                          lowerEyeHeightMM: simd_dot(eye - lower.center, lower.normal) * 1000,
                          lowerValid: lowerValid,
                          marginsMM: marginsMM, pMax: pMax,
+                         effectiveRecessMM: recess * 1000,
                          materialFound: materialFound, materialTotal: materialTotal)
         snapLock.unlock()
     }
