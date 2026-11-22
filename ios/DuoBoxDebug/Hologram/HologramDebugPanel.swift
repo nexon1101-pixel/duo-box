@@ -9,6 +9,8 @@ final class HologramDiagnostics: ObservableObject {
     /// 調整値：壁を奥へ下げる量（mm、初期値 0）と、身長の倍率（検証用、初期値 1）
     @Published var wallRecessMM: Double = 0
     @Published var heightScale: Double = 1
+    /// 立ち位置（奥行き比）：0＝手前の端、1＝折り目（壁際）。既定 0.8＝折り目から床奥行きの20%手前
+    @Published var standDepth: Double = 0.8
     /// 機種プロファイル
     @Published var profileID = ""
     @Published var profileIsFallback = true
@@ -129,9 +131,12 @@ struct HologramDebugPanel: View {
             Text("壁を奥へ下げる量 wallRecess: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 0）")
                 .font(.caption)
             Slider(value: $diagnostics.wallRecessMM, in: 0...40, step: 1)
-            Text("身長の倍率（既定＝下パネル奥行きの60%）: ×\(String(format: "%.2f", diagnostics.heightScale))")
+            Text("身長の倍率（既定＝下パネル奥行きの100%）: ×\(String(format: "%.2f", diagnostics.heightScale))")
                 .font(.caption)
             Slider(value: $diagnostics.heightScale, in: 0.5...2, step: 0.05)
+            Text("立ち位置（奥行き比）: \(String(format: "%.2f", diagnostics.standDepth))（1＝折り目／壁際、既定 0.80）")
+                .font(.caption)
+            Slider(value: $diagnostics.standDepth, in: 0.5...0.95, step: 0.01)
             TimelineView(.periodic(from: .now, by: 0.5)) { _ in
                 let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
                 VStack(alignment: .leading, spacing: 3) {

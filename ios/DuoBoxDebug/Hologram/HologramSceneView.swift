@@ -44,12 +44,20 @@ final class HologramRig {
     private var _heightScale: Float = 1     // 身長の倍率（検証用）
     func setWallRecess(_ v: Float) { tuneLock.lock(); _wallRecess = max(v, 0); tuneLock.unlock() }
     func setHeightScale(_ v: Float) { tuneLock.lock(); _heightScale = max(v, 0.1); tuneLock.unlock() }
+    private var _standDepth: Float = 0.8    // 立ち位置の奥行き比（0＝手前の端、1＝壁際）
+    func setStandDepth(_ v: Float) { tuneLock.lock(); _standDepth = min(max(v, 0.3), 0.98); tuneLock.unlock() }
+    private var standDepth: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _standDepth }
     private var wallRecess: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _wallRecess }
     private var heightScale: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _heightScale }
 
     private let worldNode = SCNNode()       // 壁と、壁側の暗がり
     private let floorFrame = SCNNode()      // 下パネルの面に合わせる枠（床・台座・影・キャラの親）
+    private let standNode = SCNNode()       // キャラ・台座・影・微粒子の親。床の奥行き方向へ動かす
     private let characterNode = SCNNode()
+    private let baseboardNode = SCNNode()   // 壁の根元の細いライン
+    private let wallFrameNode = SCNNode()   // 壁の淡い矩形の枠（彼女の背後）
+    private var wallFrameH: Float = 0.05
+    private var floorLines: [(node: SCNNode, frac: Float)] = []   // 折り目と平行な床の淡いライン
     private let idleNode = SCNNode()
     private let shadowNode = SCNNode()
     private let padNode = SCNNode()         // 台座の円盤・リング・影（身長倍率に合わせて水平方向だけ拡縮）
@@ -60,7 +68,7 @@ final class HologramRig {
     private var particles: [(node: SCNNode, base: SIMD3<Float>, phase: Float)] = []
     private var charBuilt = false
 
-    /// 既定の身長（m）。下パネル奥行き lowerH の約60%
+    /// 既定の身長（m）。下パネル奥行き lowerH と同じ
     private(set) var baseCharHeight: Float = 0.04
     private let padHeight: Float = 0.002    // 台座の厚み（キャラの足はこの上）
 
@@ -135,14 +143,17 @@ final class HologramRig {
     /// 基準の目の位置（上パネル座標）。画面の少し上、30〜40cm 手前を想定
     private var nominalEye: SIMD3<Float> { SIMD3<Float>(profile.cameraRight, upperH + 0.02, 0.36) }
 
-    /// 既定の身長：下パネル奥行きの約60%。頭が折り目を越えて上ビューに入るのは、射影が連続しているので許容する
-    private func defaultCharHeight() -> Float { lowerH * 0.6 }
+    /// 既定の身長：床奥行き lowerH の 1.0 倍。折り目寄り（折り目から奥行きの約20%手前）に立つので、
+    /// ヒンジ115°では頭の高さが約 0.82·lowerH（上パネル座標）になり、折り目を越えて上パネル側に抜ける
+    private func defaultCharHeight() -> Float { lowerH * 1.0 }
 
     // MARK: - シーン構築
 
     private func rebuildWorld() {
         worldNode.childNodes.forEach { $0.removeFromParentNode() }
         floorFrame.childNodes.forEach { $0.removeFromParentNode() }
+        standNode.childNodes.forEach { $0.removeFromParentNode() }
+        floorLines.removeAll()
         let w = CGFloat(width)
 
         baseCharHeight = defaultCharHeight()
@@ -189,11 +200,61 @@ final class HologramRig {
         floorShade.renderingOrder = 2
         floorFrame.addChildNode(floorShade)
 
+        // 部屋の奥行きの手がかり（控えめ：壁・床より少し明るい程度の無発光の細線だけ）
+        func lineMaterial(_ c: UIColor) -> SCNMaterial {
+            let m = SCNMaterial()
+            m.lightingModel = .constant
+            m.diffuse.contents = c
+            m.isDoubleSided = true
+            return m
+        }
+        // ① 巾木：壁の根元に沿った細いライン
+        baseboardNode.removeFromParentNode()
+        let baseboard = SCNPlane(width: w * 3, height: 0.004)
+        baseboard.materials = [lineMaterial(UIColor(red: 0.29, green: 0.32, blue: 0.41, alpha: 1))]
+        baseboardNode.geometry = baseboard
+        worldNode.addChildNode(baseboardNode)
+        // ② 床の淡いライン：折り目と平行、実寸で等間隔（遠近法で奥ほど詰まって見える）。角からの奥行き比 0.3 / 0.55 / 0.8
+        for f: Float in [0.3, 0.55, 0.8] {
+            let plane = SCNPlane(width: w * 3, height: 0.0012)
+            plane.materials = [lineMaterial(UIColor(red: 0.23, green: 0.25, blue: 0.32, alpha: 1))]
+            let n = SCNNode(geometry: plane)
+            n.eulerAngles.x = -.pi / 2
+            n.renderingOrder = 1
+            floorFrame.addChildNode(n)
+            floorLines.append((n, f))
+        }
+        // ③ 壁の矩形の枠：彼女の背後。キャラより一回り大きい（上パネルに収まる範囲）
+        wallFrameNode.removeFromParentNode()
+        wallFrameNode.childNodes.forEach { $0.removeFromParentNode() }
+        let fh = min(charH * 1.2, upperH * 0.8)
+        let fw = fh * 0.62
+        wallFrameH = fh
+        let t: Float = 0.0015
+        let frameMat = lineMaterial(UIColor(red: 0.30, green: 0.33, blue: 0.43, alpha: 1))
+        let fillMat = lineMaterial(UIColor(red: 0.235, green: 0.255, blue: 0.335, alpha: 1))
+        let fill = SCNNode(geometry: SCNPlane(width: CGFloat(fw), height: CGFloat(fh)))
+        fill.geometry?.materials = [fillMat]
+        wallFrameNode.addChildNode(fill)
+        let edges: [(CGFloat, CGFloat, Float, Float)] = [
+            (CGFloat(fw), CGFloat(t), 0, fh / 2), (CGFloat(fw), CGFloat(t), 0, -fh / 2),
+            (CGFloat(t), CGFloat(fh), -fw / 2, 0), (CGFloat(t), CGFloat(fh), fw / 2, 0)]
+        for (ew, eh, ex, ey) in edges {
+            let plane = SCNPlane(width: ew, height: eh)
+            plane.materials = [frameMat]
+            let n = SCNNode(geometry: plane)
+            n.position = SCNVector3(ex, ey, 0.0002)
+            wallFrameNode.addChildNode(n)
+        }
+        worldNode.addChildNode(wallFrameNode)
+
+        standNode.removeFromParentNode()
+        floorFrame.addChildNode(standNode)
         padNode.removeFromParentNode()
         padNode.childNodes.forEach { $0.removeFromParentNode() }
-        floorFrame.addChildNode(padNode)
+        standNode.addChildNode(padNode)
         // 台座：低い円盤＋細いリング1本（明滅なし）。floorFrame の原点＝下パネルの中央
-        let radius = max(CGFloat(charH) * 0.45, 0.008)   // 身長の約0.45倍。倍率スライダーには padNode のスケールで追従
+        let radius = max(CGFloat(charH) * 0.32, 0.008)   // 身長の約0.32倍。倍率スライダーには padNode のスケールで追従
         let disc = SCNCylinder(radius: radius, height: CGFloat(padHeight))
         let discMat = SCNMaterial()
         discMat.lightingModel = .constant
@@ -243,11 +304,11 @@ final class HologramRig {
             let rx = frac(sin(fi * 12.9898) * 43758.5453)
             let ry = frac(sin(fi * 78.233) * 12345.678)
             let rz = frac(sin(fi * 39.346) * 24680.13)
-            let base = SIMD3<Float>((rx - 0.5) * width * 0.8,
+            let base = SIMD3<Float>((rx - 0.5) * width * 0.7,
                                     padHeight + 0.004 + ry * (charH * 1.2 + 0.01),
-                                    (rz - 0.5) * lowerH * 0.8)
+                                    (rz - 0.5) * lowerH * 0.5)   // standNode の局所座標（キャラのまわり）
             n.simdPosition = base
-            floorFrame.addChildNode(n)
+            standNode.addChildNode(n)
             particles.append((n, base, fi * 1.7))
         }
 
@@ -286,7 +347,7 @@ final class HologramRig {
         // モデルの正面は +Z（ビルド75〜79で atan2(dx,dz) により +Z を視点へ向けて正面が見えていた／Blender系USD出力は前方 -Y→+Z）。
         // 向きが逆なら modelFrontYaw を .pi にする
         characterNode.eulerAngles = SCNVector3(0, Self.modelFrontYaw, 0)
-        floorFrame.addChildNode(characterNode)
+        standNode.addChildNode(characterNode)
         charBuilt = true
     }
 
@@ -389,6 +450,17 @@ final class HologramRig {
         floorNode.simdScale = SIMD3(1, floorLen, 1)
         floorShade.simdPosition = SIMD3(0, 0.0003, sC + 0.015 - lowerH / 2)
 
+        // 立ち位置：角（sC）から手前の端までの床の奥行きに対し、standDepth（0＝手前、1＝壁際）の位置
+        let floorDepth = max(lowerH - sC, 0.01)
+        standNode.simdPosition = SIMD3(0, 0, sC - lowerH / 2 + (1 - standDepth) * floorDepth)
+        // 部屋の手がかり：巾木・床のライン・壁の枠
+        baseboardNode.simdPosition = SIMD3(0, yC + 0.002, -recess + 0.0004)
+        for l in floorLines {
+            l.node.simdPosition = SIMD3(0, 0.0002, sC - lowerH / 2 + l.frac * floorDepth)
+        }
+        let frameBottom = yC + max(upperH * 0.06, 0.006)
+        wallFrameNode.simdPosition = SIMD3(0, frameBottom + wallFrameH / 2, -recess + 0.0005)
+
         // 身長の倍率（検証用）。足元が原点なので足は動かない
         let hs = heightScale
         idleNode.simdScale = SIMD3(hs, hs, hs)
@@ -490,6 +562,8 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
             // 計測パネルの調整値を描画側へ流す
             cancellables.removeAll()
             diagnostics.$wallRecessMM.sink { [weak self] v in self?.rig.setWallRecess(Float(v) / 1000) }
+                .store(in: &cancellables)
+            diagnostics.$standDepth.sink { [weak self] v in self?.rig.setStandDepth(Float(v)) }
                 .store(in: &cancellables)
             diagnostics.$heightScale.sink { [weak self] v in self?.rig.setHeightScale(Float(v)) }
                 .store(in: &cancellables)
