@@ -14,6 +14,10 @@ final class HologramDiagnostics: ObservableObject {
     @Published var pAuto: Bool = true
     @Published var wAuto: Bool = true
     @Published var wLean: Double = 0
+    /// 1€ フィルタの調整値（手順5）：最小カットオフ (Hz)、速度係数 β、先読み (ms)
+    @Published var oeMinCutoff: Double = 1.2
+    @Published var oeBeta: Double = 0.8
+    @Published var oePredMS: Double = 20
     /// 角度ごとの p・w の記録（UserDefaults に保存）
     @Published var pwRecords: [PWRecord] = []
 
@@ -278,6 +282,18 @@ struct HologramDebugPanel: View {
                 }
                 .font(.system(.footnote, design: .monospaced))
             }
+
+            Divider()
+            Text("1€ フィルタと先読み（手順5）").font(.caption.bold())
+            Text("最小カットオフ: \(String(format: "%.2f", diagnostics.oeMinCutoff)) Hz（小さいほど静止時に安定、大きいほど追従）")
+                .font(.caption)
+            Slider(value: $diagnostics.oeMinCutoff, in: 0.2...5, step: 0.05)
+            Text("速度係数 β: \(String(format: "%.2f", diagnostics.oeBeta))（速く動いたときの追従の強さ）")
+                .font(.caption)
+            Slider(value: $diagnostics.oeBeta, in: 0...3, step: 0.05)
+            Text("先読み: \(String(format: "%.0f", diagnostics.oePredMS)) ms（表示までの遅れの埋め合わせ）")
+                .font(.caption)
+            Slider(value: $diagnostics.oePredMS, in: 0...50, step: 1)
 
             // 軸対応は固定値。マーカー（⑦）で見て向きが逆なら、ここで直す
             Divider()

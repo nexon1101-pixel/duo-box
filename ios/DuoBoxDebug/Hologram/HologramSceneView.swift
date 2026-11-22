@@ -53,6 +53,15 @@ final class HologramRig {
     private var _wLean: Float = 0            // 手動の w（0＝床の法線どおり、1＝真上）
     func setWLean(_ v: Float) { tuneLock.lock(); _wLean = min(max(v, 0), 1); tuneLock.unlock() }
     private var wLean: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _wLean }
+    private var _oeMinCutoff: Float = 1.2    // 1€ 最小カットオフ (Hz)
+    func setOneEuroMinCutoff(_ v: Float) { tuneLock.lock(); _oeMinCutoff = min(max(v, 0.05), 10); tuneLock.unlock() }
+    private var oeMinCutoff: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _oeMinCutoff }
+    private var _oeBeta: Float = 0.8         // 1€ 速度係数（速く動くほどカットオフを上げる）
+    func setOneEuroBeta(_ v: Float) { tuneLock.lock(); _oeBeta = min(max(v, 0), 5); tuneLock.unlock() }
+    private var oeBeta: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _oeBeta }
+    private var _oePred: Float = 0.02        // 先読み時間 (秒)
+    func setOneEuroPred(_ v: Float) { tuneLock.lock(); _oePred = min(max(v, 0), 0.08); tuneLock.unlock() }
+    private var oePred: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _oePred }
     private var _pAuto: Bool = true          // 前後位置 p を角度で自動にするか（既定は自動）
     func setPAuto(_ v: Bool) { tuneLock.lock(); _pAuto = v; tuneLock.unlock() }
     private var pAuto: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _pAuto }
@@ -120,10 +129,36 @@ final class HologramRig {
     private(set) var materialFound = 0
     private(set) var materialTotal = 0
 
-    private var smoothedEye = SIMD3<Float>(0, 0.1, 0.36)
+    /// 1€ フィルタ（Casiez et al., CHI 2012）：速度でカットオフが変わるローパス。
+    /// 静止時は強くなめらかに、速く動くほど追従する。dxHat が先読みに使う速度になる
+    private struct OneEuro3 {
+        var xHat = SIMD3<Float>(0, 0, 0)
+        var dxHat = SIMD3<Float>(0, 0, 0)
+        private var prevX = SIMD3<Float>(0, 0, 0)
+        private var initialized = false
+
+        mutating func filter(_ x: SIMD3<Float>, dt: Float, minCutoff: Float, beta: Float, dCutoff: Float) -> SIMD3<Float> {
+            let dtc = max(dt, 0.001)
+            if !initialized { xHat = x; prevX = x; initialized = true; return x }
+            let dx = (x - prevX) / dtc
+            prevX = x
+            dxHat += (dx - dxHat) * Self.alpha(cutoff: dCutoff, dt: dtc)
+            for i in 0..<3 {
+                let cutoff = minCutoff + beta * abs(dxHat[i])
+                xHat[i] += (x[i] - xHat[i]) * Self.alpha(cutoff: cutoff, dt: dtc)
+            }
+            return xHat
+        }
+
+        private static func alpha(cutoff: Float, dt: Float) -> Float {
+            let tau = 1 / (2 * Float.pi * max(cutoff, 0.01))
+            return 1 / (1 + tau / dt)
+        }
+    }
+
+    private var eyeFilter = OneEuro3()
     private var smoothedAngle: Float = .pi     // 全開 180° から始める
     private var lastTime: TimeInterval = 0
-    private var eyeInitialized = false
     /// 顔ロスト時の保持用：最後に顔で決まった目の目標と、ロストが始まった時刻
     private var lastFaceTarget: SIMD3<Float>?
     private var faceLostSince: TimeInterval?
@@ -631,9 +666,10 @@ final class HologramRig {
         } else {
             target = nominalEye + SIMD3<Float>(manual.x, manual.y, 0)
         }
-        if !eyeInitialized { smoothedEye = target; eyeInitialized = true }
-        smoothedEye += (target - smoothedEye) * k
-        let eye = SIMD3<Float>(smoothedEye.x, smoothedEye.y, max(smoothedEye.z, 0.1))
+        // 平滑化は 1€ フィルタ（手順5）。さらに速度×先読み時間だけ先の位置を出して表示までの遅れを埋める
+        let filtered = eyeFilter.filter(target, dt: Float(dt), minCutoff: oeMinCutoff, beta: oeBeta, dCutoff: 1.0)
+        let predicted = filtered + eyeFilter.dxHat * oePred
+        let eye = SIMD3<Float>(predicted.x, predicted.y, max(predicted.z, 0.1))
 
         // 折り角度：取れなければ全開 180°（＝従来の単一平面）。ライブ更新に追従
         let angleTarget = Float(min(max(hinge?.radians ?? .pi, .pi / 6), .pi))
@@ -868,6 +904,9 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
             diagnostics.$pPos.sink { [weak self] v in self?.rig.setPPos(Float(v)) }
             diagnostics.$wAuto.sink { [weak self] v in self?.rig.setWAuto(v) }
             diagnostics.$wLean.sink { [weak self] v in self?.rig.setWLean(Float(v)) }
+            diagnostics.$oeMinCutoff.sink { [weak self] v in self?.rig.setOneEuroMinCutoff(Float(v)) }
+            diagnostics.$oeBeta.sink { [weak self] v in self?.rig.setOneEuroBeta(Float(v)) }
+            diagnostics.$oePredMS.sink { [weak self] v in self?.rig.setOneEuroPred(Float(v) / 1000) }
             diagnostics.$pAuto.sink { [weak self] v in self?.rig.setPAuto(v) }
             diagnostics.$pwRecords.sink { [weak self] recs in
                 self?.rig.setPWTable(recs.map { (angle: Float($0.angleDeg), p: Float($0.p), w: Float($0.w)) })
