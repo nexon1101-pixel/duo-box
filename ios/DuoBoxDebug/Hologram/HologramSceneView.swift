@@ -53,6 +53,28 @@ final class HologramRig {
     private var _wLean: Float = 0            // 手動の w（0＝床の法線どおり、1＝真上）
     func setWLean(_ v: Float) { tuneLock.lock(); _wLean = min(max(v, 0), 1); tuneLock.unlock() }
     private var wLean: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _wLean }
+    private var _pAuto: Bool = true          // 前後位置 p を角度で自動にするか（既定は自動）
+    func setPAuto(_ v: Bool) { tuneLock.lock(); _pAuto = v; tuneLock.unlock() }
+    private var pAuto: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _pAuto }
+    private var _pwTable: [(angle: Float, p: Float, w: Float)] = []   // 角度ごとの p・w 記録（角度の昇順）
+    func setPWTable(_ t: [(angle: Float, p: Float, w: Float)]) { tuneLock.lock(); _pwTable = t; tuneLock.unlock() }
+    private var pwTable: [(angle: Float, p: Float, w: Float)] { tuneLock.lock(); defer { tuneLock.unlock() }; return _pwTable }
+
+    /// 記録表から角度に対する p・w を線形補間する。表が空、または角度が記録の範囲外なら nil
+    private func pwInterp(angleDeg: Float) -> (p: Float, w: Float)? {
+        let t = pwTable
+        guard let first = t.first, let last = t.last,
+              angleDeg >= first.angle, angleDeg <= last.angle else { return nil }
+        if t.count == 1 { return (first.p, first.w) }
+        for i in 0..<(t.count - 1) {
+            let a = t[i], b = t[i + 1]
+            if angleDeg >= a.angle && angleDeg <= b.angle {
+                let f = b.angle > a.angle ? (angleDeg - a.angle) / (b.angle - a.angle) : 0
+                return (a.p + (b.p - a.p) * f, a.w + (b.w - a.w) * f)
+            }
+        }
+        return nil
+    }
     private var _showMarkers = false        // 位置合わせマーカーの表示
     func setShowMarkers(_ v: Bool) { tuneLock.lock(); _showMarkers = v; tuneLock.unlock() }
     private var showMarkers: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _showMarkers }
@@ -625,7 +647,10 @@ final class HologramRig {
         // 立ち位置：p（0＝手前の端、1＝折り目、1超は床の角まで）を、折り目からの距離へ直して置く
         let floorDepth = max(lowerH - sC, 0.01)
         let pMax = 1 + (-sC) / lowerH
-        let pEff = min(max(pPos, 0), pMax)
+        let angleDegNow = th * 180 / .pi
+        let pwNow = pwInterp(angleDeg: angleDegNow)
+        let pBase = pAuto ? (pwNow?.p ?? 0.5) : pPos
+        let pEff = min(max(pBase, 0), pMax)
         let distFold = (1 - pEff) * lowerH    // 折り目から手前方向への距離（負＝折り目より奥）
         standNode.simdPosition = SIMD3(0, 0, distFold - lowerH / 2)
         // 部屋の手がかり：巾木・床のライン・壁の枠
@@ -661,12 +686,14 @@ final class HologramRig {
             g.node.isHidden = !gs
         }
 
-        // 向き w：自動なら角度で決める（110°で 0、170°で 1 の smoothstep）。手動ならスライダーの値
-        let thDeg = th * 180 / .pi
+        // 向き w：自動なら、記録表があればその補間、なければ角度の smoothstep（110°で 0、170°で 1）。手動ならスライダーの値
         let wEff: Float
         if wAuto {
-            let tw = min(max((thDeg - 110) / 60, 0), 1)
-            wEff = tw * tw * (3 - 2 * tw)
+            if let pw = pwNow { wEff = pw.w }
+            else {
+                let tw = min(max((angleDegNow - 110) / 60, 0), 1)
+                wEff = tw * tw * (3 - 2 * tw)
+            }
         } else { wEff = wLean }
         // キャラの上方向 u（床の法線から真上へ w だけ寄せる）。台座は床のまま、キャラだけ傾ける。足は台座の中心のまま
         let upW = simd_normalize(lower.normal * (1 - wEff) + SIMD3<Float>(0, 1, 0) * wEff)
@@ -824,6 +851,10 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
             diagnostics.$pPos.sink { [weak self] v in self?.rig.setPPos(Float(v)) }
             diagnostics.$wAuto.sink { [weak self] v in self?.rig.setWAuto(v) }
             diagnostics.$wLean.sink { [weak self] v in self?.rig.setWLean(Float(v)) }
+            diagnostics.$pAuto.sink { [weak self] v in self?.rig.setPAuto(v) }
+            diagnostics.$pwRecords.sink { [weak self] recs in
+                self?.rig.setPWTable(recs.map { (angle: Float($0.angleDeg), p: Float($0.p), w: Float($0.w)) })
+            }
                 .store(in: &cancellables)
             diagnostics.$heightScale.sink { [weak self] v in self?.rig.setHeightScale(Float(v)) }
                 .store(in: &cancellables)

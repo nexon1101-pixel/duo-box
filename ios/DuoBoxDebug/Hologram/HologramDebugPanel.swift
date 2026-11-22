@@ -9,10 +9,45 @@ final class HologramDiagnostics: ObservableObject {
     /// 調整値：壁を奥へ下げる量（mm、初期値 30）と、身長の倍率（検証用、初期値 1）
     @Published var wallRecessMM: Double = 30
     @Published var heightScale: Double = 1
-    /// 立ち位置（奥行き比）：0＝手前の端、1＝折り目（壁際）。既定 0.8＝折り目から床奥行きの20%手前
+    /// 前後位置 p：0＝手前の端、1＝折り目、1超＝床の角まで。既定 0.5
     @Published var pPos: Double = 0.5
+    @Published var pAuto: Bool = true
     @Published var wAuto: Bool = true
     @Published var wLean: Double = 0
+    /// 角度ごとの p・w の記録（UserDefaults に保存）
+    @Published var pwRecords: [PWRecord] = []
+
+    struct PWRecord: Equatable {
+        var angleDeg: Double
+        var p: Double
+        var w: Double
+    }
+
+    private static let pwKey = "hologram.pwTable.v1"
+
+    init() {
+        let raw = UserDefaults.standard.array(forKey: Self.pwKey) as? [[Double]] ?? []
+        pwRecords = raw.compactMap { $0.count == 3 ? PWRecord(angleDeg: $0[0], p: $0[1], w: $0[2]) : nil }
+            .sorted { $0.angleDeg < $1.angleDeg }
+    }
+
+    /// いまの角度・p・w を記録する（同じ角度（±1°以内）の記録があれば置き換え）
+    func recordCurrentPW(angleDeg: Double, p: Double, w: Double) {
+        pwRecords.removeAll { abs($0.angleDeg - angleDeg) < 1 }
+        pwRecords.append(PWRecord(angleDeg: angleDeg, p: p, w: w))
+        pwRecords.sort { $0.angleDeg < $1.angleDeg }
+        persistPW()
+    }
+
+    func deletePWRecord(at index: Int) {
+        guard pwRecords.indices.contains(index) else { return }
+        pwRecords.remove(at: index)
+        persistPW()
+    }
+
+    private func persistPW() {
+        UserDefaults.standard.set(pwRecords.map { [$0.angleDeg, $0.p, $0.w] }, forKey: Self.pwKey)
+    }
     /// 位置合わせマーカーの表示
     @Published var showMarkers = false
     /// 格子（床と壁）の表示
@@ -59,6 +94,8 @@ struct HologramDebugPanel: View {
                 markerSection
                 Divider()
                 marginSection
+                Divider()
+                recordsSection
                 Divider()
                 chipSection
             }
@@ -144,9 +181,12 @@ struct HologramDebugPanel: View {
             Text("身長の倍率（自動で決めた身長に掛かる）: ×\(String(format: "%.2f", diagnostics.heightScale))")
                 .font(.caption)
             Slider(value: $diagnostics.heightScale, in: 0.5...2, step: 0.05)
-            Text("前後位置 p: \(String(format: "%.2f", diagnostics.pPos))（0＝手前の端、1＝折り目、1超＝床の角まで、既定 0.5）")
+            Toggle("前後位置 p は角度で自動（既定 0.5／記録があれば補間）", isOn: $diagnostics.pAuto)
+                .font(.caption)
+            Text("前後位置 p（手動）: \(String(format: "%.2f", diagnostics.pPos))（0＝手前の端、1＝折り目、1超＝床の角まで）")
                 .font(.caption)
             Slider(value: $diagnostics.pPos, in: 0...1.6, step: 0.01)
+                .disabled(diagnostics.pAuto)
             Toggle("向き w は角度で自動（110°で 0 → 170°で 1）", isOn: $diagnostics.wAuto)
                 .font(.caption)
             Text("向き w（手動）: \(String(format: "%.2f", diagnostics.wLean))（0＝床に垂直、1＝真上）")
@@ -307,6 +347,40 @@ struct HologramDebugPanel: View {
             Spacer(minLength: 8)
             Text("上 \(f(upper)) ／ 下 \(f(lower))")
                 .foregroundStyle(!vals.isEmpty && worst < 0 ? .red : .white)
+        }
+    }
+
+    // MARK: 角度ごとの記録
+
+    private var recordsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("⑨ 角度ごとの p・w 記録").font(.subheadline.bold())
+            TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("いま：\(String(format: "%.0f", s.angleDeg))°／p \(String(format: "%.2f", s.pEff))／w \(String(format: "%.2f", s.wEff))")
+                        .font(.system(.footnote, design: .monospaced))
+                    Button("この角度の p と w を記録") {
+                        diagnostics.recordCurrentPW(angleDeg: Double(s.angleDeg), p: Double(s.pEff), w: Double(s.wEff))
+                    }
+                    .font(.caption)
+                }
+            }
+            if diagnostics.pwRecords.isEmpty {
+                Text("記録はまだない").font(.caption2).foregroundStyle(.white.opacity(0.7))
+            } else {
+                ForEach(Array(diagnostics.pwRecords.enumerated()), id: \.offset) { i, r in
+                    HStack {
+                        Text("\(String(format: "%.0f", r.angleDeg))°: p \(String(format: "%.2f", r.p))／w \(String(format: "%.2f", r.w))")
+                            .font(.system(.footnote, design: .monospaced))
+                        Spacer(minLength: 8)
+                        Button("削除") { diagnostics.deletePWRecord(at: i) }
+                            .font(.caption)
+                    }
+                }
+            }
+            Text("記録がある角度の範囲では、p と w の既定値が角度で線形補間される。範囲の外と記録がないときは既定（p=0.5、w は角度の smoothstep）")
+                .font(.caption2).foregroundStyle(.white.opacity(0.7))
         }
     }
 
