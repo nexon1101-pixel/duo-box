@@ -129,9 +129,9 @@ struct HologramDebugPanel: View {
             Text("壁を奥へ下げる量 wallRecess: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 0）")
                 .font(.caption)
             Slider(value: $diagnostics.wallRecessMM, in: 0...40, step: 1)
-            Text("身長の倍率（検証用）: ×\(String(format: "%.2f", diagnostics.heightScale))")
+            Text("身長の倍率（既定＝下パネル奥行きの60%）: ×\(String(format: "%.2f", diagnostics.heightScale))")
                 .font(.caption)
-            Slider(value: $diagnostics.heightScale, in: 0.5...3, step: 0.05)
+            Slider(value: $diagnostics.heightScale, in: 0.5...2, step: 0.05)
             TimelineView(.periodic(from: .now, by: 0.5)) { _ in
                 let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
                 VStack(alignment: .leading, spacing: 3) {

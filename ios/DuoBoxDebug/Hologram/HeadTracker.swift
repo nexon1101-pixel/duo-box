@@ -53,7 +53,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         static let gain = "hologram.calib.gain"
     }
 
-    /// UI 用（メインスレッドで更新）。描画スレッドは lock 内の _axisMap / _homeRaw / _gain を読む。
+    /// UI 用（メインスレッドで更新）。描画スレッドは lock 内の lockedAxisMap / lockedHomeRaw / lockedGain を読む。
     @Published private(set) var axisMap = AxisMap.identity
     @Published private(set) var homeRaw: SIMD3<Float>?
     @Published private(set) var gain: Float = 1.0
@@ -62,9 +62,9 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var axisStep: AxisStep = .idle
     @Published private(set) var calibMessage = ""
 
-    private var _axisMap = AxisMap.identity
-    private var _homeRaw: SIMD3<Float>?
-    private var _gain: Float = 1.0
+    private var lockedAxisMap = AxisMap.identity
+    private var lockedHomeRaw: SIMD3<Float>?
+    private var lockedGain: Float = 1.0
     private var recent: [SIMD3<Float>] = []          // 直近の生サンプル（静止位置の平均用）
     private var frontRaw: SIMD3<Float>?
     private var leftAxis = 0
@@ -73,16 +73,16 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     private func loadCalibration() {
         let d = UserDefaults.standard
         if let a = d.array(forKey: Key.axis) as? [Double], a.count == 4 {
-            _axisMap = AxisMap(xAxis: min(max(Int(a[0]), 0), 2), xSign: a[1] < 0 ? -1 : 1,
+            lockedAxisMap = AxisMap(xAxis: min(max(Int(a[0]), 0), 2), xSign: a[1] < 0 ? -1 : 1,
                                yAxis: min(max(Int(a[2]), 0), 2), ySign: a[3] < 0 ? -1 : 1)
         }
         if let h = d.array(forKey: Key.home) as? [Double], h.count == 3 {
-            _homeRaw = SIMD3<Float>(Float(h[0]), Float(h[1]), Float(h[2]))
+            lockedHomeRaw = SIMD3<Float>(Float(h[0]), Float(h[1]), Float(h[2]))
         }
         if d.object(forKey: Key.gain) != nil {
-            _gain = min(max(Float(d.double(forKey: Key.gain)), Self.gainRange.lowerBound), Self.gainRange.upperBound)
+            lockedGain = min(max(Float(d.double(forKey: Key.gain)), Self.gainRange.lowerBound), Self.gainRange.upperBound)
         }
-        axisMap = _axisMap; homeRaw = _homeRaw; gain = _gain
+        axisMap = lockedAxisMap; homeRaw = lockedHomeRaw; gain = lockedGain
     }
 
     override init() {
@@ -91,20 +91,20 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     private func saveAxisMap() {
-        let m = _axisMap
+        let m = lockedAxisMap
         UserDefaults.standard.set([Double(m.xAxis), Double(m.xSign), Double(m.yAxis), Double(m.ySign)], forKey: Key.axis)
     }
 
     /// 手動で軸対応を選び直す（自動判定が外れた場合用）
     func setAxisMap(_ m: AxisMap) {
-        lock.lock(); _axisMap = m; lock.unlock()
+        lock.lock(); lockedAxisMap = m; lock.unlock()
         axisMap = m
         saveAxisMap()
     }
 
     func setGain(_ g: Float) {
         let v = min(max(g, Self.gainRange.lowerBound), Self.gainRange.upperBound)
-        lock.lock(); _gain = v; lock.unlock()
+        lock.lock(); lockedGain = v; lock.unlock()
         gain = v
         UserDefaults.standard.set(Double(v), forKey: Key.gain)
     }
@@ -119,7 +119,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     /// ホーム位置：今の目位置を記録する
     func recordHome() {
         guard let p = stillPosition() else { calibMessage = "顔が見えていません。カメラの方を向いてください"; return }
-        lock.lock(); _homeRaw = p; lock.unlock()
+        lock.lock(); lockedHomeRaw = p; lock.unlock()
         homeRaw = p
         UserDefaults.standard.set([Double(p.x), Double(p.y), Double(p.z)], forKey: Key.home)
         calibMessage = "ホームを記録しました"
@@ -174,7 +174,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     func resetCalibration() {
         let d = UserDefaults.standard
         d.removeObject(forKey: Key.axis); d.removeObject(forKey: Key.home); d.removeObject(forKey: Key.gain)
-        lock.lock(); _axisMap = .identity; _homeRaw = nil; _gain = 1.0; lock.unlock()
+        lock.lock(); lockedAxisMap = .identity; lockedHomeRaw = nil; lockedGain = 1.0; lock.unlock()
         axisMap = .identity; homeRaw = nil; gain = 1.0
         frontRaw = nil; axisStep = .idle; calibMessage = "キャリブレーションを既定に戻しました"
     }
@@ -183,9 +183,9 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     /// = gain × (map(raw) − map(home))。ホーム未記録なら defaultHomeMapped（変換後座標での既定の基準）を使う。
     func sceneDelta(defaultHomeMapped: SIMD3<Float>) -> SIMD3<Float> {
         lock.lock(); defer { lock.unlock() }
-        let cur = _axisMap.apply(_head)
-        let home = _homeRaw.map { _axisMap.apply($0) } ?? defaultHomeMapped
-        return (cur - home) * _gain
+        let cur = lockedAxisMap.apply(_head)
+        let home = lockedHomeRaw.map { lockedAxisMap.apply($0) } ?? defaultHomeMapped
+        return (cur - home) * lockedGain
     }
 
     /// 最後に顔を捉えてからの秒数。まだ一度も捉えていなければ nil。デバッグ表示用。

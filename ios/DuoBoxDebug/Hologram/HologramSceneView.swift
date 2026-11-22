@@ -30,8 +30,8 @@ final class HologramRig {
     /// ドラッグ用の手動視点：基準の目の位置からのずれ（x, y のみ使う）
     var manual = SIMD3<Float>(0, 0, 0)
 
-    /// キャラの身長を決める基準の折り角（115°）
-    static let referenceAngle: Float = 115 * .pi / 180
+    /// モデルの正面が floorFrame の +z（+d）を向くための y 回転。モデル正面は +Z なので 0
+    static let modelFrontYaw: Float = 0
 
     private var width: Float = 0.065
     private var upperH: Float = 0.07
@@ -52,6 +52,7 @@ final class HologramRig {
     private let characterNode = SCNNode()
     private let idleNode = SCNNode()
     private let shadowNode = SCNNode()
+    private let padNode = SCNNode()         // 台座の円盤・リング・影（身長倍率に合わせて水平方向だけ拡縮）
     private let wallNode = SCNNode()
     private let floorNode = SCNNode()
     private let wallShade = SCNNode()
@@ -59,8 +60,8 @@ final class HologramRig {
     private var particles: [(node: SCNNode, base: SIMD3<Float>, phase: Float)] = []
     private var charBuilt = false
 
-    /// 基準角・基準視点で全身が下パネルに収まる身長（m）
-    private(set) var baseCharHeight: Float = 0.03
+    /// 既定の身長（m）。下パネル奥行き lowerH の約60%
+    private(set) var baseCharHeight: Float = 0.04
     private let padHeight: Float = 0.002    // 台座の厚み（キャラの足はこの上）
 
     /// 読み込み済みのモデル（USDZ は 41MB あるので1回だけ読む。折り目が変わっても読み直さない）
@@ -134,30 +135,8 @@ final class HologramRig {
     /// 基準の目の位置（上パネル座標）。画面の少し上、30〜40cm 手前を想定
     private var nominalEye: SIMD3<Float> { SIMD3<Float>(profile.cameraRight, upperH + 0.02, 0.36) }
 
-    /// 基準角 115° で、基準視点の範囲（左右・上下・距離）を動いても、頭の先が下パネルの窓に収まる最大の身長。
-    /// 床（下パネル）に立つ高さ H の点は、目の面内ずれ e∥・目の床からの高さ h として、
-    /// 窓の上で足元から H·|e∥| / (h − H) だけ離れて見える。これが半窓幅以内になる H を、サンプルした視点の最小値で決める。
-    private func computeFitHeight() -> Float {
-        let plane = lowerPlane(angle: Self.referenceAngle)
-        let base = nominalEye
-        let mv = lowerH / 2 * 0.9          // 窓の縦の許容（半分の90%）
-        let mx = width / 2 * 0.8           // 窓の横の許容（半分の80%：体の幅の余裕）
-        var best = Float.greatestFiniteMagnitude
-        for dx: Float in [-0.08, 0, 0.08] {
-            for dy: Float in [-0.06, 0, 0.06] {
-                for ez: Float in [0.25, 0.36, 0.45] {
-                    let e = SIMD3<Float>(base.x + dx, base.y + dy, ez) - plane.center
-                    let h = simd_dot(e, plane.normal)
-                    guard h > 0.03 else { continue }   // 床より上にいない視点は対象外
-                    let ev = abs(simd_dot(e, plane.up))
-                    let ex = abs(e.x)
-                    best = min(best, mv * h / (ev + mv), mx * h / (ex + mx))
-                }
-            }
-        }
-        guard best < Float.greatestFiniteMagnitude else { return 0.03 }
-        return min(max(best, 0.02), 0.115)
-    }
+    /// 既定の身長：下パネル奥行きの約60%。頭が折り目を越えて上ビューに入るのは、射影が連続しているので許容する
+    private func defaultCharHeight() -> Float { lowerH * 0.6 }
 
     // MARK: - シーン構築
 
@@ -166,7 +145,7 @@ final class HologramRig {
         floorFrame.childNodes.forEach { $0.removeFromParentNode() }
         let w = CGFloat(width)
 
-        baseCharHeight = computeFitHeight()
+        baseCharHeight = defaultCharHeight()
         let charH = baseCharHeight
 
         // 壁（上パネルの面）と床（下パネルの面）。位置と長さは折り角と wallRecess で変わるので update() で毎フレーム合わせる。
@@ -210,8 +189,11 @@ final class HologramRig {
         floorShade.renderingOrder = 2
         floorFrame.addChildNode(floorShade)
 
+        padNode.removeFromParentNode()
+        padNode.childNodes.forEach { $0.removeFromParentNode() }
+        floorFrame.addChildNode(padNode)
         // 台座：低い円盤＋細いリング1本（明滅なし）。floorFrame の原点＝下パネルの中央
-        let radius = min(max(CGFloat(charH) * 0.45, 0.008), w * 0.3)
+        let radius = max(CGFloat(charH) * 0.45, 0.008)   // 身長の約0.45倍。倍率スライダーには padNode のスケールで追従
         let disc = SCNCylinder(radius: radius, height: CGFloat(padHeight))
         let discMat = SCNMaterial()
         discMat.lightingModel = .constant
@@ -219,7 +201,7 @@ final class HologramRig {
         disc.materials = [discMat]
         let pad = SCNNode(geometry: disc)
         pad.position = SCNVector3(0, padHeight / 2, 0)
-        floorFrame.addChildNode(pad)
+        padNode.addChildNode(pad)
 
         let ring = SCNTorus(ringRadius: radius, pipeRadius: 0.0006)
         let ringMat = SCNMaterial()
@@ -228,7 +210,7 @@ final class HologramRig {
         ring.materials = [ringMat]
         let ringNode = SCNNode(geometry: ring)
         ringNode.position = SCNVector3(0, padHeight + 0.0004, 0)
-        floorFrame.addChildNode(ringNode)
+        padNode.addChildNode(ringNode)
 
         // 接地影：キャラの真下の濃い影（台座の上）
         let shadowPlane = SCNPlane(width: radius * 1.5, height: radius * 1.5)
@@ -243,7 +225,7 @@ final class HologramRig {
         shadowNode.position = SCNVector3(0, padHeight + 0.0008, 0)
         shadowNode.renderingOrder = 5
         shadowNode.opacity = 1.0
-        floorFrame.addChildNode(shadowNode)
+        padNode.addChildNode(shadowNode)
 
         // 浮遊する微粒子（少数の小さな球）。床の上、キャラのまわりを漂う
         particles.removeAll()
@@ -300,8 +282,10 @@ final class HologramRig {
         idleNode.removeFromParentNode()
         characterNode.addChildNode(idleNode)
         characterNode.position = SCNVector3(0, padHeight, 0)
-        // 向きは正面固定（+z＝利用者側）。回り込むと横側が見える
-        characterNode.eulerAngles = SCNVector3Zero
+        // 向き：floorFrame の +z（＝下パネルの折り目から手前の端へ向かう +d）へ正面を向ける。
+        // モデルの正面は +Z（ビルド75〜79で atan2(dx,dz) により +Z を視点へ向けて正面が見えていた／Blender系USD出力は前方 -Y→+Z）。
+        // 向きが逆なら modelFrontYaw を .pi にする
+        characterNode.eulerAngles = SCNVector3(0, Self.modelFrontYaw, 0)
         floorFrame.addChildNode(characterNode)
         charBuilt = true
     }
@@ -408,6 +392,7 @@ final class HologramRig {
         // 身長の倍率（検証用）。足元が原点なので足は動かない
         let hs = heightScale
         idleNode.simdScale = SIMD3(hs, hs, hs)
+        padNode.simdScale = SIMD3(hs, 1, hs)   // 台座の半径も身長に連動（厚みは変えない）
 
         // 上パネル：中心 (0, upperH/2, 0)、右 +x、上 +y
         _ = setProjection(camera: upperCamera, eye: eye,
