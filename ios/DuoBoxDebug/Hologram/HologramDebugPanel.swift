@@ -13,6 +13,8 @@ final class HologramDiagnostics: ObservableObject {
     @Published var standDepth: Double = 0.8
     /// 位置合わせマーカーの表示
     @Published var showMarkers = false
+    /// 格子（床と壁）の表示
+    @Published var showGrid = true
     /// 機種プロファイル
     @Published var profileID = ""
     @Published var profileIsFallback = true
@@ -141,6 +143,8 @@ struct HologramDebugPanel: View {
             Text("立ち位置（奥行き比）: \(String(format: "%.2f", diagnostics.standDepth))（1＝折り目／壁際、既定 0.80）")
                 .font(.caption)
             Slider(value: $diagnostics.standDepth, in: 0.5...0.95, step: 0.01)
+            Toggle("格子を表示（床と壁、20mm間隔）", isOn: $diagnostics.showGrid)
+                .font(.caption)
             TimelineView(.periodic(from: .now, by: 0.5)) { _ in
                 let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
                 VStack(alignment: .leading, spacing: 3) {

@@ -50,6 +50,9 @@ final class HologramRig {
     private var _showMarkers = false        // 位置合わせマーカーの表示
     func setShowMarkers(_ v: Bool) { tuneLock.lock(); _showMarkers = v; tuneLock.unlock() }
     private var showMarkers: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _showMarkers }
+    private var _showGrid = true            // 格子（床と壁）の表示
+    func setShowGrid(_ v: Bool) { tuneLock.lock(); _showGrid = v; tuneLock.unlock() }
+    private var showGrid: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _showGrid }
     private var wallRecess: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _wallRecess }
     private var heightScale: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _heightScale }
 
@@ -70,6 +73,12 @@ final class HologramRig {
     private let floorShade = SCNNode()
     private var particles: [(node: SCNNode, base: SIMD3<Float>, phase: Float)] = []
     private var markerNodes: [SCNNode] = []   // 位置合わせマーカー（rebuildWorld で作り直す）
+    // 格子：部屋の角を原点に gridStep 間隔で引く細線。位置は update() で毎フレーム角に合わせる
+    private let gridStep: Float = 0.02
+    private var gridWallH: [(node: SCNNode, k: Float)] = []
+    private var gridWallV: [(node: SCNNode, k: Float)] = []
+    private var gridFloorH: [(node: SCNNode, k: Float)] = []
+    private var gridFloorV: [(node: SCNNode, k: Float)] = []
     private var charBuilt = false
 
     /// 既定の身長（m）。下パネル奥行き lowerH と同じ
@@ -162,6 +171,7 @@ final class HologramRig {
         standNode.childNodes.forEach { $0.removeFromParentNode() }
         floorLines.removeAll()
         markerNodes.removeAll()
+        gridWallH.removeAll(); gridWallV.removeAll(); gridFloorH.removeAll(); gridFloorV.removeAll()
         let w = CGFloat(width)
 
         baseCharHeight = defaultCharHeight()
@@ -283,6 +293,45 @@ final class HologramRig {
         let foldCenter = marker(.yellow)         // 折り目の中央（上下の段差チェック用）
         foldCenter.simdPosition = SIMD3(0, 0, 0.0012)
         worldNode.addChildNode(foldCenter)
+
+        // 格子：床と壁に 20mm 間隔の細線。部屋の角を原点にするので、折り目で床と壁の線がつながる。
+        // 位置と長さは折り角と wallRecess で変わるため、update() で毎フレーム合わせる（ここでは形だけ作る）
+        let gridWallMat = lineMaterial(UIColor(red: 0.32, green: 0.35, blue: 0.45, alpha: 1))
+        let gridFloorMat = lineMaterial(UIColor(red: 0.26, green: 0.28, blue: 0.36, alpha: 1))
+        for k in 1...24 {                        // 壁の横線（角から上へ）
+            let p = SCNPlane(width: w * 3, height: 0.0009)
+            p.materials = [gridWallMat]
+            let n = SCNNode(geometry: p)
+            n.renderingOrder = 1
+            worldNode.addChildNode(n)
+            gridWallH.append((n, Float(k)))
+        }
+        for k in -10...10 {                      // 壁の縦線
+            let p = SCNPlane(width: 0.0009, height: 1)
+            p.materials = [gridWallMat]
+            let n = SCNNode(geometry: p)
+            n.renderingOrder = 1
+            worldNode.addChildNode(n)
+            gridWallV.append((n, Float(k)))
+        }
+        for k in 1...10 {                        // 床の横線（角から手前へ、折り目と平行）
+            let p = SCNPlane(width: w * 3, height: 0.0012)
+            p.materials = [gridFloorMat]
+            let n = SCNNode(geometry: p)
+            n.eulerAngles.x = -.pi / 2
+            n.renderingOrder = 1
+            floorFrame.addChildNode(n)
+            gridFloorH.append((n, Float(k)))
+        }
+        for k in -10...10 {                      // 床の縦線（奥行き方向）
+            let p = SCNPlane(width: 0.0009, height: 1)
+            p.materials = [gridFloorMat]
+            let n = SCNNode(geometry: p)
+            n.eulerAngles.x = -.pi / 2
+            n.renderingOrder = 1
+            floorFrame.addChildNode(n)
+            gridFloorV.append((n, Float(k)))
+        }
         for x in [-hw, hw] {
             for z in [-lowerH / 2, lowerH / 2] {  // 下パネルの四隅（floorFrame 局所：原点は中央、z+ が手前の端）
                 let n = marker(.magenta)
@@ -508,6 +557,27 @@ final class HologramRig {
         let sm = showMarkers
         for n in markerNodes where n.isHidden == sm { n.isHidden = !sm }
 
+        // 格子：部屋の角（壁側は yC、床側は sC）を原点に等間隔で並べる。角を共有するので折り目でつながる
+        let gs = showGrid
+        for g in gridWallH {
+            g.node.simdPosition = SIMD3(0, yC + g.k * gridStep, -recess + 0.0006)
+            g.node.isHidden = !gs
+        }
+        for g in gridWallV {
+            g.node.simdPosition = SIMD3(g.k * gridStep, yC + wallH / 2, -recess + 0.0006)
+            g.node.simdScale = SIMD3(1, wallH, 1)
+            g.node.isHidden = !gs
+        }
+        for g in gridFloorH {
+            g.node.simdPosition = SIMD3(0, 0.0002, sC - lowerH / 2 + g.k * gridStep)
+            g.node.isHidden = !gs
+        }
+        for g in gridFloorV {
+            g.node.simdPosition = SIMD3(g.k * gridStep, 0.0002, (sC + floorEnd) / 2 - lowerH / 2)
+            g.node.simdScale = SIMD3(1, floorLen, 1)
+            g.node.isHidden = !gs
+        }
+
         // 身長の倍率（検証用）。足元が原点なので足は動かない
         let hs = heightScale
         idleNode.simdScale = SIMD3(hs, hs, hs)
@@ -615,6 +685,8 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
             diagnostics.$heightScale.sink { [weak self] v in self?.rig.setHeightScale(Float(v)) }
                 .store(in: &cancellables)
             diagnostics.$showMarkers.sink { [weak self] v in self?.rig.setShowMarkers(v) }
+                .store(in: &cancellables)
+            diagnostics.$showGrid.sink { [weak self] v in self?.rig.setShowGrid(v) }
                 .store(in: &cancellables)
         }
     }
