@@ -21,10 +21,13 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     /// 描画スレッドから読むための最新の頭位置。lock で保護する。
     private let lock = NSLock()
     private var _head = SIMD3<Float>(0, 0, 0.30)
+    private var _rawRel = SIMD3<Float>(0, 0, 0)   // 変換前の本当の生値（ARKitカメラ座標。向き変換・abs・クランプを通す前）
     private var _faceActive = false
     private var _lastFaceTime: TimeInterval?   // 最後に顔を捉えた時刻（CACurrentMediaTime）
 
     var head: SIMD3<Float> { lock.lock(); defer { lock.unlock() }; return _head }
+    /// 切り分け表示用：didUpdate で計算した rel そのもの（符号もクランプもそのまま）
+    var rawRel: SIMD3<Float> { lock.lock(); defer { lock.unlock() }; return _rawRel }
     var faceActive: Bool { lock.lock(); defer { lock.unlock() }; return _faceActive }
 
     // MARK: - キャリブレーション（軸対応・ホーム位置・視差ゲイン）
@@ -332,6 +335,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         // 目はカメラの前（-z 側）にいるので、距離は -z。極端な値は丸める
         let dist = min(max(abs(rel.z), 0.15), 0.9)
         lock.lock()
+        _rawRel = SIMD3<Float>(rel.x, rel.y, rel.z)
         _head = SIMD3<Float>(sx, sy, dist)
         recent.append(_head)
         if recent.count > 20 { recent.removeFirst(recent.count - 20) }

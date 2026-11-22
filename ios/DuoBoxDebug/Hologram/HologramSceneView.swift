@@ -40,7 +40,7 @@ final class HologramRig {
 
     // 調整値（メインスレッドで書き、描画スレッドで読む）
     private let tuneLock = NSLock()
-    private var _wallRecess: Float = 0      // 壁を奥へ下げる量（m）
+    private var _wallRecess: Float = 0.040  // 壁を奥へ下げる量（m、初期値 40mm。パネル側の初期値と一致させる）
     private var _heightScale: Float = 1     // 身長の倍率（検証用）
     func setWallRecess(_ v: Float) { tuneLock.lock(); _wallRecess = max(v, 0); tuneLock.unlock() }
     func setHeightScale(_ v: Float) { tuneLock.lock(); _heightScale = max(v, 0.1); tuneLock.unlock() }
@@ -122,10 +122,13 @@ final class HologramRig {
     }
 
     /// 上下のパネルの大きさ（メートル）。変わったときだけ作り直す。
+    /// ただし 0.2mm 未満の変化では作り直さない（折り目位置の微振動で全体が再構築されるのを防ぐ歯止め）。
     func configure(width: Float, upperH: Float, lowerH: Float) {
         self.width = width; self.upperH = upperH; self.lowerH = lowerH
         let key = SIMD3(width, upperH, lowerH)
         if key != builtFor {
+            let d = abs(key - builtFor)
+            if d.x < 0.0002 && d.y < 0.0002 && d.z < 0.0002 { return }
             builtFor = key
             rebuildWorld()
         }

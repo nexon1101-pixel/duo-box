@@ -6,8 +6,8 @@ import SwiftUI
 final class HologramDiagnostics: ObservableObject {
     /// 配置・描画の現在値を読むための参照（パネルが定期的に読む）
     weak var rig: HologramRig?
-    /// 調整値：壁を奥へ下げる量（mm、初期値 0）と、身長の倍率（検証用、初期値 1）
-    @Published var wallRecessMM: Double = 0
+    /// 調整値：壁を奥へ下げる量（mm、初期値 40）と、身長の倍率（検証用、初期値 1）
+    @Published var wallRecessMM: Double = 40
     @Published var heightScale: Double = 1
     /// 立ち位置（奥行き比）：0＝手前の端、1＝折り目（壁際）。既定 0.8＝折り目から床奥行きの20%手前
     @Published var standDepth: Double = 0.8
@@ -128,9 +128,9 @@ struct HologramDebugPanel: View {
     private var roomSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("③ 部屋・配置").font(.subheadline.bold())
-            Text("壁を奥へ下げる量 wallRecess: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 0）")
+            Text("壁を奥へ下げる量 wallRecess: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 40）")
                 .font(.caption)
-            Slider(value: $diagnostics.wallRecessMM, in: 0...40, step: 1)
+            Slider(value: $diagnostics.wallRecessMM, in: 0...100, step: 1)
             Text("身長の倍率（既定＝下パネル奥行きの100%）: ×\(String(format: "%.2f", diagnostics.heightScale))")
                 .font(.caption)
             Slider(value: $diagnostics.heightScale, in: 0.5...2, step: 0.05)
@@ -212,9 +212,11 @@ struct HologramDebugPanel: View {
             // 切り分け用：生座標とシーン座標を常時表示
             TimelineView(.periodic(from: .now, by: 0.2)) { _ in
                 let h = tracker.head
+                let r = tracker.rawRel
                 let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
                 VStack(alignment: .leading, spacing: 3) {
-                    row("目の生座標(m)", String(format: "x%+.3f y%+.3f z%+.3f", h.x, h.y, h.z))
+                    row("真の生値 rel(m)", String(format: "x%+.3f y%+.3f z%+.3f", r.x, r.y, r.z))
+                    row("変換後 head(m)", String(format: "x%+.3f y%+.3f z%+.3f", h.x, h.y, h.z))
                     row("シーン座標(m)", String(format: "x%+.3f y%+.3f z%+.3f", s.eye.x, s.eye.y, s.eye.z))
                     row("顔", tracker.faceActive ? "捕捉中" : "見えていません")
                 }
