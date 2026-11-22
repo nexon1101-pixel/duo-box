@@ -47,6 +47,9 @@ final class HologramRig {
     private var _standDepth: Float = 0.8    // 立ち位置の奥行き比（0＝手前の端、1＝壁際）
     func setStandDepth(_ v: Float) { tuneLock.lock(); _standDepth = min(max(v, 0.3), 0.98); tuneLock.unlock() }
     private var standDepth: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _standDepth }
+    private var _showMarkers = false        // 位置合わせマーカーの表示
+    func setShowMarkers(_ v: Bool) { tuneLock.lock(); _showMarkers = v; tuneLock.unlock() }
+    private var showMarkers: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _showMarkers }
     private var wallRecess: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _wallRecess }
     private var heightScale: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _heightScale }
 
@@ -66,6 +69,7 @@ final class HologramRig {
     private let wallShade = SCNNode()
     private let floorShade = SCNNode()
     private var particles: [(node: SCNNode, base: SIMD3<Float>, phase: Float)] = []
+    private var markerNodes: [SCNNode] = []   // 位置合わせマーカー（rebuildWorld で作り直す）
     private var charBuilt = false
 
     /// 既定の身長（m）。下パネル奥行き lowerH と同じ
@@ -157,6 +161,7 @@ final class HologramRig {
         floorFrame.childNodes.forEach { $0.removeFromParentNode() }
         standNode.childNodes.forEach { $0.removeFromParentNode() }
         floorLines.removeAll()
+        markerNodes.removeAll()
         let w = CGFloat(width)
 
         baseCharHeight = defaultCharHeight()
@@ -250,6 +255,41 @@ final class HologramRig {
             wallFrameNode.addChildNode(n)
         }
         worldNode.addChildNode(wallFrameNode)
+
+        // 位置合わせマーカー：物理的な画面の角・折り目に対応する点。壁の凹み（wallRecess）には付けず、
+        // 画面の面そのもの（上パネルは z=0、下パネルは floorFrame の面）に置く。
+        // 投影・寸法・カメラ位置が合っていれば、頭を動かしても画面の角に張り付いて見える。
+        func marker(_ color: UIColor) -> SCNNode {
+            let m = SCNMaterial()
+            m.lightingModel = .constant
+            m.diffuse.contents = color
+            let s = SCNSphere(radius: 0.0028)
+            s.materials = [m]
+            let n = SCNNode(geometry: s)
+            n.isHidden = true
+            n.renderingOrder = 5
+            markerNodes.append(n)
+            return n
+        }
+        let hw = width / 2
+        for x in [-hw, hw] {
+            let top = marker(.cyan)              // 上パネルの角
+            top.simdPosition = SIMD3(x, upperH, 0.0012)
+            worldNode.addChildNode(top)
+            let fold = marker(.yellow)           // 折り目の端
+            fold.simdPosition = SIMD3(x, 0, 0.0012)
+            worldNode.addChildNode(fold)
+        }
+        let foldCenter = marker(.yellow)         // 折り目の中央（上下の段差チェック用）
+        foldCenter.simdPosition = SIMD3(0, 0, 0.0012)
+        worldNode.addChildNode(foldCenter)
+        for x in [-hw, hw] {
+            for z in [-lowerH / 2, lowerH / 2] {  // 下パネルの四隅（floorFrame 局所：原点は中央、z+ が手前の端）
+                let n = marker(.magenta)
+                n.simdPosition = SIMD3(x, 0.0015, z)
+                floorFrame.addChildNode(n)
+            }
+        }
 
         standNode.removeFromParentNode()
         floorFrame.addChildNode(standNode)
@@ -464,6 +504,10 @@ final class HologramRig {
         let frameBottom = yC + max(upperH * 0.06, 0.006)
         wallFrameNode.simdPosition = SIMD3(0, frameBottom + wallFrameH / 2, -recess + 0.0005)
 
+        // 位置合わせマーカーの表示切り替え（パネルのトグル）
+        let sm = showMarkers
+        for n in markerNodes where n.isHidden == sm { n.isHidden = !sm }
+
         // 身長の倍率（検証用）。足元が原点なので足は動かない
         let hs = heightScale
         idleNode.simdScale = SIMD3(hs, hs, hs)
@@ -569,6 +613,8 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
             diagnostics.$standDepth.sink { [weak self] v in self?.rig.setStandDepth(Float(v)) }
                 .store(in: &cancellables)
             diagnostics.$heightScale.sink { [weak self] v in self?.rig.setHeightScale(Float(v)) }
+                .store(in: &cancellables)
+            diagnostics.$showMarkers.sink { [weak self] v in self?.rig.setShowMarkers(v) }
                 .store(in: &cancellables)
         }
     }

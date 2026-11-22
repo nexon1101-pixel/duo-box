@@ -11,6 +11,8 @@ final class HologramDiagnostics: ObservableObject {
     @Published var heightScale: Double = 1
     /// 立ち位置（奥行き比）：0＝手前の端、1＝折り目（壁際）。既定 0.8＝折り目から床奥行きの20%手前
     @Published var standDepth: Double = 0.8
+    /// 位置合わせマーカーの表示
+    @Published var showMarkers = false
     /// 機種プロファイル
     @Published var profileID = ""
     @Published var profileIsFallback = true
@@ -49,6 +51,8 @@ struct HologramDebugPanel: View {
                 trackingSection
                 Divider()
                 calibrationSection
+                Divider()
+                markerSection
                 Divider()
                 chipSection
             }
@@ -277,6 +281,20 @@ struct HologramDebugPanel: View {
 
             Button("キャリブレーションをリセット", role: .destructive) { tracker.resetCalibration() }
                 .buttonStyle(.bordered)
+        }
+    }
+
+    // MARK: マーカー（位置合わせ）
+
+    private var markerSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("⑦ マーカー（位置合わせ確認）").font(.subheadline.bold())
+            Toggle("マーカーを表示", isOn: $diagnostics.showMarkers)
+                .font(.caption)
+            Text("画面の角と折り目に印が出る（上パネルの角＝水色、折り目＝黄色、下パネルの角＝マゼンタ）。投影と寸法が合っていれば、頭を動かしても印は画面の角に張り付いたままになる")
+                .font(.caption2).foregroundStyle(.white.opacity(0.7))
+            Text("読み方：印の動きが頭より大きい・小さい → 寸法（mm/pt）かカメラ位置のずれ／印が頭と逆向きに動く → 軸対応が逆／折り目の印が上下で段差になる → 上下の描画で目の位置が食い違っている")
+                .font(.caption2).foregroundStyle(.white.opacity(0.7))
         }
     }
 
