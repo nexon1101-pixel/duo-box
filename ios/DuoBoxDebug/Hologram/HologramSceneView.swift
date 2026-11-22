@@ -47,6 +47,12 @@ final class HologramRig {
     private var _pPos: Float = 0.5          // 前後位置 p（0＝下パネルの手前の端、1＝折り目、1超＝床の角まで）
     func setPPos(_ v: Float) { tuneLock.lock(); _pPos = max(v, 0); tuneLock.unlock() }
     private var pPos: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _pPos }
+    private var _wAuto: Bool = true          // 向き w を角度で自動にするか（既定は自動）
+    func setWAuto(_ v: Bool) { tuneLock.lock(); _wAuto = v; tuneLock.unlock() }
+    private var wAuto: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _wAuto }
+    private var _wLean: Float = 0            // 手動の w（0＝床の法線どおり、1＝真上）
+    func setWLean(_ v: Float) { tuneLock.lock(); _wLean = min(max(v, 0), 1); tuneLock.unlock() }
+    private var wLean: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _wLean }
     private var _showMarkers = false        // 位置合わせマーカーの表示
     func setShowMarkers(_ v: Bool) { tuneLock.lock(); _showMarkers = v; tuneLock.unlock() }
     private var showMarkers: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _showMarkers }
@@ -108,6 +114,7 @@ final class HologramRig {
         var autoHeightMM: Float = 0
         var pEff: Float = 0.5
         var padPct: Float = 100
+        var wEff: Float = 0
         var lowerEyeHeightMM: Float = 0
         var lowerValid = true
     }
@@ -165,31 +172,62 @@ final class HologramRig {
     /// ビルド時の基準身長（モデルの拡縮の基準値）。実際の身長は update() で自動決定する
     private func defaultCharHeight() -> Float { lowerH * 1.0 }
 
-    /// 身長の自動決定：上パネルの上端で頭が見切れない高さ。
-    /// 上限は2つの小さい方：
-    ///   (a) 立ち位置の床から上パネルの上端までの高さ（法線方向）の 70%
-    ///   (b) 目の位置が箱（x ±5cm、y 3〜12cm、z 25〜40cm）のどこにあっても、
-    ///       頭のてっぺんの投影が上パネルの上端より 10% 以上下に収まる高さ
-    /// 折り角・wallRecess・立ち位置が変わると上限も変わるので、update() から毎フレーム呼ぶ。
-    private func autoCharHeight(stand S: SIMD3<Float>, normal n: SIMD3<Float>) -> Float {
-        let spanCap = max(0.7 * (upperH - S.y) / max(n.y, 0.2), 0.02)
-        // 目の箱のサンプル（角と代表点）
-        var eyes: [SIMD3<Float>] = []
-        for x in [Float(-0.05), 0, 0.05] { for y in [Float(0.03), 0.12] { for z in [Float(0.25), 0.40] {
+    /// 点 P を目 E から見たときの「見切れ余裕」（m）。
+    /// 窓ごとに、点がその窓の側にあるときだけ数える：上パネルは交点 y≧0 のとき上端と左右、
+    /// 下パネルは交点の折り目からの距離 v≧0 のとき手前の端と左右までの余裕の最小値。
+    /// 両方の窓で数えられる場合は大きい方（実際に見えている側）を採用。数えられなければ nil。
+    private func windowMargin(_ P: SIMD3<Float>, eye E: SIMD3<Float>,
+                              d: SIMD3<Float>, n: SIMD3<Float>) -> Float? {
+        var best: Float? = nil
+        let dz = E.z - P.z
+        if dz > 1e-6 {
+            let q = E + (P - E) * (E.z / dz)              // 上パネル面（z=0）との交点
+            if q.y >= 0 { best = min(upperH - q.y, q.x + width / 2, width / 2 - q.x) }
+        }
+        let denom = simd_dot(P - E, n)
+        if abs(denom) > 1e-9 {
+            let t = simd_dot(-E, n) / denom
+            if t > 0 {
+                let q = E + (P - E) * t                   // 下パネル面との交点
+                let v = simd_dot(q, d)                    // 折り目からの距離
+                if v >= 0 {
+                    let m = min(lowerH - v, q.x + width / 2, width / 2 - q.x)
+                    best = best.map { max($0, m) } ?? m
+                }
+            }
+        }
+        return best
+    }
+
+    /// 身長の自動決定：既定は 0.6 × min(上パネル高, 下パネル高)。
+    /// 目の位置が箱（x ±6cm、y 3〜22cm、z 25〜45cm）のどこにあっても、
+    /// 頭・体の左右・1/4・1/2・3/4 の点と台座の縁の余裕が 8mm 未満になる場合は、その分だけ小さくする。
+    /// 折り角・立ち位置・向きが変わると結果も変わるので、update() から毎フレーム呼ぶ。
+    private func fittedHeight(stand S: SIMD3<Float>, up u: SIMD3<Float>,
+                              d: SIMD3<Float>, n: SIMD3<Float>, eye: SIMD3<Float>) -> Float {
+        let target = 0.6 * min(upperH, lowerH)
+        let base = S + n * padHeight                       // 足の位置（台座の上面）
+        var eyes: [SIMD3<Float>] = [eye]
+        for x in [Float(-0.06), 0, 0.06] { for y in [Float(0.03), 0.125, 0.22] { for z in [Float(0.25), 0.45] {
             eyes.append(SIMD3<Float>(x, y, z))
         } } }
-        func headFits(_ h: Float, _ e: SIMD3<Float>) -> Bool {
-            let p = S + n * (padHeight + h)          // 頭のてっぺん（台座の上に立つ）
-            let dz = e.z - p.z
-            guard dz > 0.02 else { return false }    // 目と同じか手前にある頭は上端に収まらない扱い
-            let py = e.y + (p.y - e.y) * (e.z / dz)  // 上パネル面（z=0）への投影の y
-            return py <= upperH * 0.9
+        func minMargin(_ h: Float) -> Float {
+            let r = h * 0.32
+            let pts: [SIMD3<Float>] = [
+                base + u * h, base + u * (h * 0.25), base + u * (h * 0.5), base + u * (h * 0.75),
+                base + u * (h * 0.5) + SIMD3(0.15 * h, 0, 0), base + u * (h * 0.5) - SIMD3(0.15 * h, 0, 0),
+                S + SIMD3(r, 0, 0), S - SIMD3(r, 0, 0), S + d * r, S - d * r]
+            var m: Float = .greatestFiniteMagnitude
+            for e in eyes { for p in pts {
+                if let w = windowMargin(p, eye: e, d: d, n: n) { m = min(m, w) }
+            } }
+            return m
         }
-        if eyes.allSatisfy({ headFits(spanCap, $0) }) { return spanCap }
-        var lo: Float = 0.02, hi = spanCap
-        for _ in 0..<24 {
+        if minMargin(target) >= 0.008 { return target }
+        var lo: Float = 0.01, hi = target
+        for _ in 0..<20 {
             let mid = (lo + hi) / 2
-            if eyes.allSatisfy({ headFits(mid, $0) }) { lo = mid } else { hi = mid }
+            if minMargin(mid) >= 0.008 { lo = mid } else { hi = mid }
         }
         return lo
     }
@@ -611,9 +649,22 @@ final class HologramRig {
             g.node.isHidden = !gs
         }
 
-        // 身長は自動決定（見切れない上限）。手動の倍率はその上に掛かる。足元が原点なので足は動かない
+        // 向き w：自動なら角度で決める（110°で 0、170°で 1 の smoothstep）。手動ならスライダーの値
+        let thDeg = th * 180 / .pi
+        let wEff: Float
+        if wAuto {
+            let tw = min(max((thDeg - 110) / 60, 0), 1)
+            wEff = tw * tw * (3 - 2 * tw)
+        } else { wEff = wLean }
+        // キャラの上方向 u（床の法線から真上へ w だけ寄せる）。台座は床のまま、キャラだけ傾ける。足は台座の中心のまま
+        let upW = simd_normalize(lower.normal * (1 - wEff) + SIMD3<Float>(0, 1, 0) * wEff)
+        let tiltA = atan2(wEff * cos(th), (1 - wEff) + wEff * sin(th))
+        characterNode.simdOrientation = simd_quatf(angle: tiltA, axis: SIMD3<Float>(1, 0, 0))
+            * simd_quatf(angle: Self.modelFrontYaw, axis: SIMD3<Float>(0, 1, 0))
+
+        // 身長は自動決定（0.6×小さい方のパネル高が既定、余裕 8mm を切る分だけ縮小）。手動の倍率はその上に掛かる
         let standWorld = lower.center + lower.d * standNode.simdPosition.z
-        let autoH = autoCharHeight(stand: standWorld, normal: lower.normal)
+        let autoH = fittedHeight(stand: standWorld, up: upW, d: lower.d, n: lower.normal, eye: eye)
         let hs = baseCharHeight > 0.001 ? (autoH * heightScale) / baseCharHeight : 1
         idleNode.simdScale = SIMD3(hs, hs, hs)
         padNode.simdScale = SIMD3(hs, 1, hs)   // 台座の半径も身長に連動（厚みは変えない）
@@ -647,7 +698,7 @@ final class HologramRig {
         _snap = Snapshot(eye: eye, angleDeg: th * 180 / .pi,
                          charHeightMM: baseCharHeight * hs * 1000,
                          autoHeightMM: autoH * 1000,
-                         pEff: pEff, padPct: padPct,
+                         pEff: pEff, padPct: padPct, wEff: wEff,
                          lowerEyeHeightMM: simd_dot(eye - lower.center, lower.normal) * 1000,
                          lowerValid: lowerValid)
         snapLock.unlock()
@@ -730,6 +781,8 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
             diagnostics.$wallRecessMM.sink { [weak self] v in self?.rig.setWallRecess(Float(v) / 1000) }
                 .store(in: &cancellables)
             diagnostics.$pPos.sink { [weak self] v in self?.rig.setPPos(Float(v)) }
+            diagnostics.$wAuto.sink { [weak self] v in self?.rig.setWAuto(v) }
+            diagnostics.$wLean.sink { [weak self] v in self?.rig.setWLean(Float(v)) }
                 .store(in: &cancellables)
             diagnostics.$heightScale.sink { [weak self] v in self?.rig.setHeightScale(Float(v)) }
                 .store(in: &cancellables)

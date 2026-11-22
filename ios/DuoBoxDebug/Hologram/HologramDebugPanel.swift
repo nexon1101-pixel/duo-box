@@ -11,6 +11,8 @@ final class HologramDiagnostics: ObservableObject {
     @Published var heightScale: Double = 1
     /// 立ち位置（奥行き比）：0＝手前の端、1＝折り目（壁際）。既定 0.8＝折り目から床奥行きの20%手前
     @Published var pPos: Double = 0.5
+    @Published var wAuto: Bool = true
+    @Published var wLean: Double = 0
     /// 位置合わせマーカーの表示
     @Published var showMarkers = false
     /// 格子（床と壁）の表示
@@ -143,14 +145,21 @@ struct HologramDebugPanel: View {
             Text("前後位置 p: \(String(format: "%.2f", diagnostics.pPos))（0＝手前の端、1＝折り目、1超＝床の角まで、既定 0.5）")
                 .font(.caption)
             Slider(value: $diagnostics.pPos, in: 0...1.6, step: 0.01)
+            Toggle("向き w は角度で自動（110°で 0 → 170°で 1）", isOn: $diagnostics.wAuto)
+                .font(.caption)
+            Text("向き w（手動）: \(String(format: "%.2f", diagnostics.wLean))（0＝床に垂直、1＝真上）")
+                .font(.caption)
+            Slider(value: $diagnostics.wLean, in: 0...1, step: 0.01)
+                .disabled(diagnostics.wAuto)
             Toggle("格子を表示（床と壁、20mm間隔）", isOn: $diagnostics.showGrid)
                 .font(.caption)
             TimelineView(.periodic(from: .now, by: 0.5)) { _ in
                 let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
                 VStack(alignment: .leading, spacing: 3) {
                     row("身長（実際）", "\(fmt(CGFloat(s.charHeightMM))) mm")
-                    row("身長（自動の上限）", "\(fmt(CGFloat(s.autoHeightMM))) mm")
+                    row("身長（自動）", "\(fmt(CGFloat(s.autoHeightMM))) mm")
                     row("前後位置 p（実際）", String(format: "%.2f", s.pEff))
+                    row("向き w（実際）", String(format: "%.2f", s.wEff))
                     row("台座が下画面に乗る割合", String(format: "%.0f %%", s.padPct))
                     row("目の位置(上パネル座標)", String(format: "x%.0f y%.0f z%.0f mm", s.eye.x * 1000, s.eye.y * 1000, s.eye.z * 1000))
                     row("折り角度", "\(fmt(CGFloat(s.angleDeg)))°")
