@@ -8,10 +8,16 @@ struct HologramView: View {
 
     /// 状態ラベル。ヒンジ角度が取れていれば併記する（取れなければ全開 180° 扱い）
     private var statusLine: String {
-        if let deg = hinge.angleDegrees {
-            return "\(tracker.statusText)｜ヒンジ \(Int(deg.rounded()))°"
+        var line = tracker.statusText
+        // 顔が見つからない状態が続くときの手がかり：最後に捉えてからの秒数
+        if tracker.mode == .searching {
+            if let sec = tracker.secondsSinceFace { line += "（最後に捕捉から\(sec)秒）" }
+            else { line += "（まだ一度も捕捉なし）" }
         }
-        return "\(tracker.statusText)｜ヒンジ角度なし（全開扱い）"
+        if let deg = hinge.angleDegrees {
+            return "\(line)｜ヒンジ \(Int(deg.rounded()))°"
+        }
+        return "\(line)｜ヒンジ角度なし（全開扱い）"
     }
 
     var body: some View {
@@ -21,7 +27,11 @@ struct HologramView: View {
 
             // 状態ラベル（顔トラッキング中か、ドラッグ操作かが分かる）
             VStack {
-                Text(statusLine)
+                // 秒数を1秒ごとに更新するため TimelineView で包む
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    Text(statusLine)
+                        .multilineTextAlignment(.center)
+                }
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.85))
                     .padding(.horizontal, 12)

@@ -9,6 +9,9 @@ import SwiftUI
 /// 下半分の平面は、折り目まわりにヒンジ角ぶん回った面。全開（180°）なら上半分と同一平面になり、
 /// 2つの投影は継ぎ目なくつながって単一投影と等価になる。
 /// キャラと台座は3D空間のノードなので、折り目を跨いでも曲がらない。
+/// 小数部（Float）。
+private func frac(_ x: Float) -> Float { x - x.rounded(.down) }
+
 final class HologramRig {
     let scene = SCNScene()
     let upperCamera = SCNNode()
@@ -30,6 +33,14 @@ final class HologramRig {
 
     private let worldNode = SCNNode()
     private let characterNode = SCNNode()
+    /// 呼吸・傾き・フリッカー用。characterNode（Y 回転と浮遊）の子にして干渉させない
+    private let idleNode = SCNNode()
+    private let shadowNode = SCNNode()
+    private let scanNode = SCNNode()
+    private var particles: [(node: SCNNode, base: SIMD3<Float>, phase: Float)] = []
+    private var charHeight: Float = 0.1
+    private var baseY: Float = 0          // キャラの浮遊の基準高さ（台座の上）
+    private var charBuilt = false
 
     private var smoothedEye = SIMD3<Float>(0, 0, 0.30)
     private var smoothedAngle: Float = .pi     // 全開 180° から始める
@@ -125,11 +136,51 @@ final class HologramRig {
         worldNode.addChildNode(pad)
         worldNode.addChildNode(ringNode)
 
+        // キャラの真下の柔らかい影（光だまり）。浮遊に合わせて update() で濃さと大きさを変える
+        let shadowPlane = SCNPlane(width: CGFloat(radius) * 0.9, height: CGFloat(radius) * 0.9)
+        let shadowMat = SCNMaterial()
+        shadowMat.lightingModel = .constant
+        shadowMat.diffuse.contents = Self.softDiscImage()
+        shadowMat.isDoubleSided = true
+        shadowMat.writesToDepthBuffer = false
+        shadowPlane.materials = [shadowMat]
+        shadowNode.geometry = shadowPlane
+        shadowNode.eulerAngles.x = -.pi / 2
+        shadowNode.position = SCNVector3(0, floorY + 0.0042, padZ)
+        shadowNode.renderingOrder = 5
+        worldNode.addChildNode(shadowNode)
+
+        // 浮遊する微粒子（少数の小さな球。位置は update() でゆっくり漂わせる）
+        particles.removeAll()
+        let dotMat = SCNMaterial()
+        dotMat.lightingModel = .constant
+        dotMat.diffuse.contents = UIColor(red: 0.6, green: 0.95, blue: 1.0, alpha: 1)
+        dotMat.blendMode = .add
+        dotMat.writesToDepthBuffer = false
+        for i in 0..<20 {
+            let sphere = SCNSphere(radius: 0.0007)
+            sphere.segmentCount = 6
+            sphere.materials = [dotMat]
+            let n = SCNNode(geometry: sphere)
+            // 疑似乱数（再構築しても同じ配置になるよう固定式）
+            let fi = Float(i)
+            let rx = frac(sin(fi * 12.9898) * 43758.5453)
+            let ry = frac(sin(fi * 78.233) * 12345.678)
+            let rz = frac(sin(fi * 39.346) * 24680.13)
+            let base = SIMD3<Float>((rx - 0.5) * width * 0.8,
+                                    floorY + 0.01 + ry * (upperH + lowerH) * 0.85,
+                                    -Float(d) * (0.1 + rz * 0.75))
+            n.simdPosition = base
+            worldNode.addChildNode(n)
+            particles.append((n, base, fi * 1.7))
+        }
+
         // 雨衣ちゃん（公式MMDモデルを USDZ に変換したもの）。台座の上に立たせ、ゆっくり上下に浮遊させる
         let charH = min(totalH * 0.55, 0.115)
         characterNode.removeAllActions()
         characterNode.geometry = nil
         characterNode.childNodes.forEach { $0.removeFromParentNode() }
+        idleNode.childNodes.forEach { $0.removeFromParentNode() }
         if let url = Bundle.main.url(forResource: "amekoro", withExtension: "usdz"),
            let modelScene = try? SCNScene(url: url, options: nil) {
             let wrap = SCNNode()
@@ -145,7 +196,7 @@ final class HologramRig {
             wrap.enumerateChildNodes { node, _ in
                 node.geometry?.materials.forEach { $0.lightingModel = .constant }
             }
-            characterNode.addChildNode(wrap)
+            idleNode.addChildNode(wrap)
         } else {
             // モデルが読めないときの保険（従来の1枚絵プレーン）
             let plane = SCNPlane(width: charH * 2 / 3, height: charH)
@@ -157,18 +208,44 @@ final class HologramRig {
             plane.materials = [cm]
             let holder = SCNNode(geometry: plane)
             holder.position = SCNVector3(0, Float(charH) / 2, 0)
-            characterNode.addChildNode(holder)
+            idleNode.addChildNode(holder)
         }
-        characterNode.position = SCNVector3(0, floorY + 0.004, padZ)
+        idleNode.removeFromParentNode()
+        characterNode.addChildNode(idleNode)
+
+        // ごく淡い走査線：キャラの前を細い帯がゆっくり上へ流れる（強さは控えめ）
+        let scanPlane = SCNPlane(width: charH * 0.7, height: charH * 0.04)
+        let scanMat = SCNMaterial()
+        scanMat.lightingModel = .constant
+        scanMat.diffuse.contents = UIColor(red: 0.5, green: 0.9, blue: 1.0, alpha: 0.10)
+        scanMat.blendMode = .add
+        scanMat.writesToDepthBuffer = false
+        scanMat.isDoubleSided = true
+        scanPlane.materials = [scanMat]
+        scanNode.removeFromParentNode()
+        scanNode.geometry = scanPlane
+        characterNode.addChildNode(scanNode)
+        charHeight = Float(charH)
+
+        baseY = floorY + 0.004
+        charBuilt = true
+        characterNode.position = SCNVector3(0, baseY, padZ)
         // 向きは毎フレーム update() で視点のほうへ回す（SCNBillboardConstraint は
         // 2つの view のカメラを区別できず片方にしか向かないため使わない）
-        let bob = SCNAction.sequence([
-            .moveBy(x: 0, y: 0.005, z: 0, duration: 1.6),
-            .moveBy(x: 0, y: -0.005, z: 0, duration: 1.6)
-        ])
-        bob.timingMode = .easeInEaseOut
-        characterNode.runAction(.repeatForever(bob))
+        // 浮遊は SCNAction ではなく update() で sin から計算する（影・傾きと同じ時間軸で動かすため）
         worldNode.addChildNode(characterNode)
+    }
+
+    /// 中心が濃く縁へ向けて消える、暗い半透明の円（影用）。
+    private static func softDiscImage() -> UIImage {
+        let size = CGSize(width: 128, height: 128)
+        return UIGraphicsImageRenderer(size: size).image { ctx in
+            let colors = [UIColor(white: 0, alpha: 0.75).cgColor, UIColor(white: 0, alpha: 0).cgColor] as CFArray
+            guard let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) else { return }
+            let c = CGPoint(x: size.width / 2, y: size.height / 2)
+            ctx.cgContext.drawRadialGradient(grad, startCenter: c, startRadius: 0,
+                                             endCenter: c, endRadius: size.width / 2, options: [])
+        }
     }
 
     /// 縁と格子線の入ったテクスチャ（半透明の青）。
@@ -228,6 +305,45 @@ final class HologramRig {
         // キャラは視点のほうへ向ける（Y 軸まわりだけ）
         let c = characterNode.simdPosition
         characterNode.eulerAngles.y = atan2(eye.x - c.x, eye.z - c.z)
+
+        updateIdle(time: Float(time.truncatingRemainder(dividingBy: 3600)))
+    }
+
+    /// アイドル演出：浮遊・ごく小さな傾き・呼吸・フリッカー・影・微粒子・走査線。すべて控えめ。
+    private func updateIdle(time t: Float) {
+        guard charBuilt else { return }
+        // 浮遊（0.005m、周期3.2秒）。k は 0（低い）〜1（高い）
+        let k = 0.5 - 0.5 * cos(2 * Float.pi * t / 3.2)
+        characterNode.simdPosition.y = baseY + 0.005 * k
+
+        // 体のごく小さな傾き（±1°）と呼吸（±0.5%）
+        let deg: Float = .pi / 180
+        idleNode.eulerAngles.z = 1.0 * deg * sin(t * 0.7)
+        idleNode.eulerAngles.x = 1.0 * deg * sin(t * 0.53 + 1.0)
+        let breath = 1 + 0.005 * sin(t * 1.9)
+        idleNode.simdScale = SIMD3<Float>(repeating: breath)
+
+        // ごく弱いフリッカー（0.97〜1.0）
+        idleNode.opacity = CGFloat(0.985 + 0.015 * sin(t * 1.7) * sin(t * 0.43 + 0.5))
+
+        // 影：キャラが高いほど薄く小さく
+        shadowNode.opacity = CGFloat(0.8 - 0.3 * k)
+        let ss = 1 - 0.12 * k
+        shadowNode.simdScale = SIMD3<Float>(ss, ss, 1)
+
+        // 走査線：キャラの高さを約6秒で下から上へ流れ、端でフェードする
+        let sp = frac(t / 6)
+        scanNode.simdPosition = SIMD3<Float>(0, charHeight * sp, 0.004)
+        scanNode.opacity = CGFloat(sin(sp * Float.pi))
+
+        // 微粒子：基準位置のまわりをゆっくり漂い、またたく
+        for p in particles {
+            let ph = p.phase
+            p.node.simdPosition = p.base + SIMD3<Float>(0.004 * sin(t * 0.5 + ph),
+                                                        0.006 * sin(t * 0.35 + ph * 1.3),
+                                                        0.003 * sin(t * 0.42 + ph * 0.7))
+            p.node.opacity = CGFloat(0.35 + 0.35 * sin(t * 0.9 + ph))
+        }
     }
 
     /// 1枚の平面（中心・右・上・法線）を窓にした off-axis 投影を、カメラへ設定する。

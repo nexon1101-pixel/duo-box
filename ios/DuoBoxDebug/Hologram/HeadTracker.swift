@@ -20,9 +20,17 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     private let lock = NSLock()
     private var _head = SIMD3<Float>(0, 0, 0.30)
     private var _faceActive = false
+    private var _lastFaceTime: TimeInterval?   // 最後に顔を捉えた時刻（CACurrentMediaTime）
 
     var head: SIMD3<Float> { lock.lock(); defer { lock.unlock() }; return _head }
     var faceActive: Bool { lock.lock(); defer { lock.unlock() }; return _faceActive }
+
+    /// 最後に顔を捉えてからの秒数。まだ一度も捉えていなければ nil。デバッグ表示用。
+    var secondsSinceFace: Int? {
+        lock.lock(); defer { lock.unlock() }
+        guard let t = _lastFaceTime else { return nil }
+        return max(0, Int(CACurrentMediaTime() - t))
+    }
 
     private var session: ARSession?
 
@@ -96,6 +104,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         lock.lock()
         _head = SIMD3<Float>(sx, sy, dist)
         _faceActive = true
+        _lastFaceTime = CACurrentMediaTime()
         lock.unlock()
         publish(.tracking)
     }
