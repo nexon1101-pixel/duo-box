@@ -117,6 +117,8 @@ final class HologramRig {
         var wEff: Float = 0
         var lowerEyeHeightMM: Float = 0
         var lowerValid = true
+        var marginUpperMM: [Float] = []   // 見切れ余裕（上パネル、mm）。並びは [頭, 足, 台座の縁, 体の左右, 1/4, 1/2, 3/4]、数えられない点は NaN
+        var marginLowerMM: [Float] = []   // 見切れ余裕（下パネル、mm）
     }
     private let snapLock = NSLock()
     private var _snap = Snapshot()
@@ -176,27 +178,37 @@ final class HologramRig {
     /// 窓ごとに、点がその窓の側にあるときだけ数える：上パネルは交点 y≧0 のとき上端と左右、
     /// 下パネルは交点の折り目からの距離 v≧0 のとき手前の端と左右までの余裕の最小値。
     /// 両方の窓で数えられる場合は大きい方（実際に見えている側）を採用。数えられなければ nil。
-    private func windowMargin(_ P: SIMD3<Float>, eye E: SIMD3<Float>,
-                              d: SIMD3<Float>, n: SIMD3<Float>) -> Float? {
-        var best: Float? = nil
+    private func windowMargins(_ P: SIMD3<Float>, eye E: SIMD3<Float>,
+                               d: SIMD3<Float>, n: SIMD3<Float>) -> (upper: Float?, lower: Float?) {
+        var upper: Float? = nil
         let dz = E.z - P.z
         if dz > 1e-6 {
             let q = E + (P - E) * (E.z / dz)              // 上パネル面（z=0）との交点
-            if q.y >= 0 { best = min(upperH - q.y, q.x + width / 2, width / 2 - q.x) }
+            if q.y >= 0 { upper = min(upperH - q.y, q.x + width / 2, width / 2 - q.x) }
         }
+        var lower: Float? = nil
         let denom = simd_dot(P - E, n)
         if abs(denom) > 1e-9 {
             let t = simd_dot(-E, n) / denom
             if t > 0 {
                 let q = E + (P - E) * t                   // 下パネル面との交点
                 let v = simd_dot(q, d)                    // 折り目からの距離
-                if v >= 0 {
-                    let m = min(lowerH - v, q.x + width / 2, width / 2 - q.x)
-                    best = best.map { max($0, m) } ?? m
-                }
+                if v >= 0 { lower = min(lowerH - v, q.x + width / 2, width / 2 - q.x) }
             }
         }
-        return best
+        return (upper, lower)
+    }
+
+    /// 窓ごとの余裕のうち、実際に見えている側（大きい方）だけを返す
+    private func windowMargin(_ P: SIMD3<Float>, eye E: SIMD3<Float>,
+                              d: SIMD3<Float>, n: SIMD3<Float>) -> Float? {
+        let m = windowMargins(P, eye: E, d: d, n: n)
+        switch (m.upper, m.lower) {
+        case let (u?, l?): return max(u, l)
+        case let (u?, nil): return u
+        case let (nil, l?): return l
+        case (nil, nil): return nil
+        }
     }
 
     /// 身長の自動決定：既定は 0.6 × min(上パネル高, 下パネル高)。
@@ -694,13 +706,42 @@ final class HologramRig {
             padPct = (1 - (cap(padR, distFold) + cap(padR, lowerH - distFold)) / (.pi * padR * padR)) * 100
         } else { padPct = (distFold >= 0 && distFold <= lowerH) ? 100 : 0 }
 
+        // 見切れ余裕（表示用）：いまの目の位置で各点を窓へ投影した余裕（mm、数えられない窓は NaN）
+        let effH = baseCharHeight * hs
+        let baseP = standWorld + lower.normal * padHeight
+        let rimR = effH * 0.32
+        let marginGroups: [[SIMD3<Float>]] = [
+            [baseP + upW * effH],                                            // 頭
+            [baseP],                                                         // 足
+            [standWorld + SIMD3(rimR, 0, 0), standWorld - SIMD3(rimR, 0, 0),
+             standWorld + lower.d * rimR, standWorld - lower.d * rimR],      // 台座の縁
+            [baseP + upW * (effH * 0.5) + SIMD3(0.15 * effH, 0, 0),
+             baseP + upW * (effH * 0.5) - SIMD3(0.15 * effH, 0, 0)],         // 体の左右
+            [baseP + upW * (effH * 0.25)],                                   // 高さ 1/4
+            [baseP + upW * (effH * 0.5)],                                    // 高さ 1/2
+            [baseP + upW * (effH * 0.75)],                                   // 高さ 3/4
+        ]
+        var marginUpperMM: [Float] = []
+        var marginLowerMM: [Float] = []
+        for g in marginGroups {
+            var u: Float? = nil, l: Float? = nil
+            for p in g {
+                let m = windowMargins(p, eye: eye, d: lower.d, n: lower.normal)
+                if let v = m.upper { u = u.map { min($0, v) } ?? v }
+                if let v = m.lower { l = l.map { min($0, v) } ?? v }
+            }
+            marginUpperMM.append((u ?? .nan) * 1000)
+            marginLowerMM.append((l ?? .nan) * 1000)
+        }
+
         snapLock.lock()
         _snap = Snapshot(eye: eye, angleDeg: th * 180 / .pi,
                          charHeightMM: baseCharHeight * hs * 1000,
                          autoHeightMM: autoH * 1000,
                          pEff: pEff, padPct: padPct, wEff: wEff,
                          lowerEyeHeightMM: simd_dot(eye - lower.center, lower.normal) * 1000,
-                         lowerValid: lowerValid)
+                         lowerValid: lowerValid,
+                         marginUpperMM: marginUpperMM, marginLowerMM: marginLowerMM)
         snapLock.unlock()
     }
 

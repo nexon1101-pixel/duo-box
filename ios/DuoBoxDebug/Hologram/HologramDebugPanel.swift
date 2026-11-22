@@ -58,6 +58,8 @@ struct HologramDebugPanel: View {
                 Divider()
                 markerSection
                 Divider()
+                marginSection
+                Divider()
                 chipSection
             }
             .padding(14)
@@ -271,6 +273,40 @@ struct HologramDebugPanel: View {
                 .font(.caption2).foregroundStyle(.white.opacity(0.7))
             Text("読み方：印の動きが頭より大きい・小さい → 寸法（mm/pt）かカメラ位置のずれ／印が頭と逆向きに動く → 軸対応が逆／折り目の印が上下で段差になる → 上下の描画で目の位置が食い違っている")
                 .font(.caption2).foregroundStyle(.white.opacity(0.7))
+        }
+    }
+
+    // MARK: 見切れ余裕
+
+    private var marginSection: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("⑧ 見切れ余裕（mm）").font(.subheadline.bold())
+            TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
+                let labels = ["頭", "足", "台座の縁", "体の左右", "高さ 1/4", "高さ 1/2", "高さ 3/4"]
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(0..<labels.count, id: \.self) { i in
+                        marginRow(labels[i],
+                                  upper: i < s.marginUpperMM.count ? s.marginUpperMM[i] : .nan,
+                                  lower: i < s.marginLowerMM.count ? s.marginLowerMM[i] : .nan)
+                    }
+                }
+                .font(.system(.footnote, design: .monospaced))
+            }
+            Text("上＝上パネルの上端と左右、下＝下パネルの手前の端と左右までの余裕。折り目側の辺は数えない。— はその窓では数えられない点")
+                .font(.caption2).foregroundStyle(.white.opacity(0.7))
+        }
+    }
+
+    private func marginRow(_ name: String, upper: Float, lower: Float) -> some View {
+        let vals = [upper, lower].filter { !$0.isNaN }
+        let worst = vals.min() ?? 0
+        func f(_ v: Float) -> String { v.isNaN ? "—" : String(format: "%+.0f", v) }
+        return HStack(alignment: .top) {
+            Text(name).foregroundStyle(.white.opacity(0.6))
+            Spacer(minLength: 8)
+            Text("上 \(f(upper)) ／ 下 \(f(lower))")
+                .foregroundStyle(!vals.isEmpty && worst < 0 ? .red : .white)
         }
     }
 
