@@ -105,6 +105,7 @@ final class HologramRig {
         var eye = SIMD3<Float>(0, 0, 0)
         var angleDeg: Float = 180
         var charHeightMM: Float = 0
+        var autoHeightMM: Float = 0
         var lowerEyeHeightMM: Float = 0
         var lowerValid = true
     }
@@ -159,9 +160,37 @@ final class HologramRig {
     /// 基準の目の位置（上パネル座標）。画面の少し上、30〜40cm 手前を想定
     private var nominalEye: SIMD3<Float> { SIMD3<Float>(profile.cameraRight, upperH + 0.02, 0.36) }
 
-    /// 既定の身長：床奥行き lowerH の 1.0 倍。折り目寄り（折り目から奥行きの約20%手前）に立つので、
-    /// ヒンジ115°では頭の高さが約 0.82·lowerH（上パネル座標）になり、折り目を越えて上パネル側に抜ける
+    /// ビルド時の基準身長（モデルの拡縮の基準値）。実際の身長は update() で自動決定する
     private func defaultCharHeight() -> Float { lowerH * 1.0 }
+
+    /// 身長の自動決定：上パネルの上端で頭が見切れない高さ。
+    /// 上限は2つの小さい方：
+    ///   (a) 立ち位置の床から上パネルの上端までの高さ（法線方向）の 70%
+    ///   (b) 目の位置が箱（x ±5cm、y 3〜12cm、z 25〜40cm）のどこにあっても、
+    ///       頭のてっぺんの投影が上パネルの上端より 10% 以上下に収まる高さ
+    /// 折り角・wallRecess・standDepth が変わると上限も変わるので、update() から毎フレーム呼ぶ。
+    private func autoCharHeight(stand S: SIMD3<Float>, normal n: SIMD3<Float>) -> Float {
+        let spanCap = max(0.7 * (upperH - S.y) / max(n.y, 0.2), 0.02)
+        // 目の箱のサンプル（角と代表点）
+        var eyes: [SIMD3<Float>] = []
+        for x in [Float(-0.05), 0, 0.05] { for y in [Float(0.03), 0.12] { for z in [Float(0.25), 0.40] {
+            eyes.append(SIMD3<Float>(x, y, z))
+        } } }
+        func headFits(_ h: Float, _ e: SIMD3<Float>) -> Bool {
+            let p = S + n * (padHeight + h)          // 頭のてっぺん（台座の上に立つ）
+            let dz = e.z - p.z
+            guard dz > 0.02 else { return false }    // 目と同じか手前にある頭は上端に収まらない扱い
+            let py = e.y + (p.y - e.y) * (e.z / dz)  // 上パネル面（z=0）への投影の y
+            return py <= upperH * 0.9
+        }
+        if eyes.allSatisfy({ headFits(spanCap, $0) }) { return spanCap }
+        var lo: Float = 0.02, hi = spanCap
+        for _ in 0..<24 {
+            let mid = (lo + hi) / 2
+            if eyes.allSatisfy({ headFits(mid, $0) }) { lo = mid } else { hi = mid }
+        }
+        return lo
+    }
 
     // MARK: - シーン構築
 
@@ -577,8 +606,10 @@ final class HologramRig {
             g.node.isHidden = !gs
         }
 
-        // 身長の倍率（検証用）。足元が原点なので足は動かない
-        let hs = heightScale
+        // 身長は自動決定（見切れない上限）。手動の倍率はその上に掛かる。足元が原点なので足は動かない
+        let standWorld = lower.center + lower.d * standNode.simdPosition.z
+        let autoH = autoCharHeight(stand: standWorld, normal: lower.normal)
+        let hs = baseCharHeight > 0.001 ? (autoH * heightScale) / baseCharHeight : 1
         idleNode.simdScale = SIMD3(hs, hs, hs)
         padNode.simdScale = SIMD3(hs, 1, hs)   // 台座の半径も身長に連動（厚みは変えない）
 
@@ -598,6 +629,7 @@ final class HologramRig {
         snapLock.lock()
         _snap = Snapshot(eye: eye, angleDeg: th * 180 / .pi,
                          charHeightMM: baseCharHeight * hs * 1000,
+                         autoHeightMM: autoH * 1000,
                          lowerEyeHeightMM: simd_dot(eye - lower.center, lower.normal) * 1000,
                          lowerValid: lowerValid)
         snapLock.unlock()

@@ -137,7 +137,7 @@ struct HologramDebugPanel: View {
             Text("壁を奥へ下げる量 wallRecess: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 40）")
                 .font(.caption)
             Slider(value: $diagnostics.wallRecessMM, in: 0...100, step: 1)
-            Text("身長の倍率（既定＝下パネル奥行きの100%）: ×\(String(format: "%.2f", diagnostics.heightScale))")
+            Text("身長の倍率（自動で決めた身長に掛かる）: ×\(String(format: "%.2f", diagnostics.heightScale))")
                 .font(.caption)
             Slider(value: $diagnostics.heightScale, in: 0.5...2, step: 0.05)
             Text("立ち位置（奥行き比）: \(String(format: "%.2f", diagnostics.standDepth))（1＝折り目／壁際、既定 0.80）")
@@ -149,6 +149,7 @@ struct HologramDebugPanel: View {
                 let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
                 VStack(alignment: .leading, spacing: 3) {
                     row("身長（実際）", "\(fmt(CGFloat(s.charHeightMM))) mm")
+                    row("身長（自動の上限）", "\(fmt(CGFloat(s.autoHeightMM))) mm")
                     row("目の位置(上パネル座標)", String(format: "x%.0f y%.0f z%.0f mm", s.eye.x * 1000, s.eye.y * 1000, s.eye.z * 1000))
                     row("折り角度", "\(fmt(CGFloat(s.angleDeg)))°")
                     row("目の床からの高さ", "\(fmt(CGFloat(s.lowerEyeHeightMM))) mm")
