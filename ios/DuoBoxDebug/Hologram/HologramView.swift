@@ -50,7 +50,7 @@ struct HologramView: View {
 
             // 計測パネル（三本指タップで開閉）
             if showDebugPanel {
-                HologramDebugPanel(hinge: hinge, diagnostics: diagnostics,
+                HologramDebugPanel(hinge: hinge, tracker: tracker, diagnostics: diagnostics,
                                    onClose: { showDebugPanel = false })
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }

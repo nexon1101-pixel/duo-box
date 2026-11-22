@@ -1,8 +1,18 @@
+import QuartzCore
 import SceneKit
 import SwiftUI
 
 /// 計測パネルへ渡す、画面（コンテナ）側で分かる値。
 final class HologramDiagnostics: ObservableObject {
+    /// 配置・描画の現在値を読むための参照（パネルが定期的に読む）
+    weak var rig: HologramRig?
+    /// 調整値：壁を奥へ下げる量（mm、初期値 0）と、身長の倍率（検証用、初期値 1）
+    @Published var wallRecessMM: Double = 0
+    @Published var heightScale: Double = 1
+    /// 機種プロファイル
+    @Published var profileID = ""
+    @Published var profileIsFallback = true
+    @Published var mmPerPt: Double = 0
     /// 折り目のY位置（reserved regions が取れなければ nil＝画面中央で代用中）
     @Published var foldY: CGFloat?
     @Published var materialFound = 0
@@ -12,6 +22,7 @@ final class HologramDiagnostics: ObservableObject {
 /// 三本指タップで開閉するデバッグパネル。実寸計測・端末情報・シェーダ書式チップ。
 struct HologramDebugPanel: View {
     @ObservedObject var hinge: HingeMonitor
+    let tracker: HeadTracker
     @ObservedObject var diagnostics: HologramDiagnostics
     var onClose: () -> Void
 
@@ -30,6 +41,10 @@ struct HologramDebugPanel: View {
                 rulerSection
                 Divider()
                 deviceSection
+                Divider()
+                roomSection
+                Divider()
+                trackingSection
                 Divider()
                 chipSection
             }
@@ -72,7 +87,10 @@ struct HologramDebugPanel: View {
         let nb = screen.nativeBounds
         return VStack(alignment: .leading, spacing: 3) {
             Text("② 端末情報").font(.subheadline.bold())
-            row("hw.machine", Self.machineID())
+            row("hw.machine", HologramDeviceProfile.readMachineID())
+            row("プロファイル", diagnostics.profileIsFallback
+                ? "未実測（近似）\(String(format: "%.4f", diagnostics.mmPerPt)) mm/pt"
+                : "実測値 \(String(format: "%.4f", diagnostics.mmPerPt)) mm/pt")
             row("bounds", "\(fmt(b.width)) × \(fmt(b.height)) pt")
             row("nativeBounds", "\(fmt(nb.width)) × \(fmt(nb.height)) px")
             row("nativeScale", fmt(screen.nativeScale))
@@ -101,20 +119,63 @@ struct HologramDebugPanel: View {
 
     private func fmt(_ v: CGFloat) -> String { String(format: "%.2f", Double(v)) }
 
-    private static func machineID() -> String {
-        var size = 0
-        sysctlbyname("hw.machine", nil, &size, nil, 0)
-        guard size > 0 else { return "不明" }
-        var buf = [CChar](repeating: 0, count: size)
-        sysctlbyname("hw.machine", &buf, &size, nil, 0)
-        return String(cString: buf)
+    // MARK: 部屋・配置
+
+    private var roomSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("③ 部屋・配置").font(.subheadline.bold())
+            Text("壁を奥へ下げる量 wallRecess: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 0）")
+                .font(.caption)
+            Slider(value: $diagnostics.wallRecessMM, in: 0...40, step: 1)
+            Text("身長の倍率（検証用）: ×\(String(format: "%.2f", diagnostics.heightScale))")
+                .font(.caption)
+            Slider(value: $diagnostics.heightScale, in: 0.5...3, step: 0.05)
+            TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
+                VStack(alignment: .leading, spacing: 3) {
+                    row("身長（実際）", "\(fmt(CGFloat(s.charHeightMM))) mm")
+                    row("目の位置(上パネル座標)", String(format: "x%.0f y%.0f z%.0f mm", s.eye.x * 1000, s.eye.y * 1000, s.eye.z * 1000))
+                    row("折り角度", "\(fmt(CGFloat(s.angleDeg)))°")
+                    row("目の床からの高さ", "\(fmt(CGFloat(s.lowerEyeHeightMM))) mm")
+                    row("下ビューの投影", s.lowerValid ? "有効" : "無効（目が床の裏側）")
+                }
+                .font(.system(.footnote, design: .monospaced))
+            }
+        }
+    }
+
+    // MARK: 顔トラッキング診断
+
+    private var trackingSection: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("④ 顔トラッキング診断").font(.subheadline.bold())
+            TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                let d = tracker.diagnosticsSnapshot()
+                let since: String = d.lastFrameTime.map { String(format: "%.1f 秒前", CACurrentMediaTime() - $0) } ?? "なし"
+                VStack(alignment: .leading, spacing: 3) {
+                    row("isSupported", d.isSupported ? "true" : "false")
+                    row("カメラ権限", d.authorization)
+                    row("セッション", d.sessionState)
+                    row("フレーム数", "\(d.frames)（最後: \(since)）")
+                    row("アンカー", "計\(d.lastAnchorCount)／顔\(d.lastFaceAnchorCount)／isTracked \(d.lastFaceTracked.map { $0 ? "true" : "false" } ?? "—")")
+                    row("カメラ状態", d.cameraState)
+                    row("対応フォーマット数", "\(d.videoFormats)")
+                    row("中断", d.interrupted ? "中断中" : "なし")
+                    row("エラー", d.lastError ?? "なし")
+                    row("顔の最終捕捉", tracker.secondsSinceFace.map { "\($0) 秒前" } ?? "まだ一度もなし")
+                }
+                .font(.system(.footnote, design: .monospaced))
+            }
+            Text("読み方：フレーム数が増えない→カメラが来ていない／増えるのに顔0→カメラに顔が映っていない")
+                .font(.caption2).foregroundStyle(.white.opacity(0.7))
+        }
     }
 
     // MARK: シェーダ書式チップ
 
     private var chipSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("③ シェーダ書式チップ（緑＝動いた／赤＝動かない）").font(.subheadline.bold())
+            Text("⑤ シェーダ書式チップ（緑＝動いた／赤＝動かない）").font(.subheadline.bold())
             HStack(spacing: 14) {
                 ForEach(ShaderChip.allCases) { chip in
                     VStack(spacing: 4) {

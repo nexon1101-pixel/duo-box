@@ -2,8 +2,10 @@ import ARKit
 import AVFoundation
 import SwiftUI
 
-/// 顔トラッキングで「頭の位置」を取る。座標は画面中心を原点にした画面基準（単位はメートル）。
+/// 顔トラッキングで「目の位置」を取る。座標は **フロントカメラのレンズを原点にした、上パネル基準**（単位はメートル）。
 ///   x: 画面の右が +、y: 画面の上が +、z: 画面から利用者へ向かう距離（常に正）
+/// 目の位置は左右の目（leftEyeTransform / rightEyeTransform）の中点。
+/// 上パネル座標（折り目が原点）へ直すときは、呼び出し側がカメラの位置（機種プロファイル）を足す。
 final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     enum Mode: Equatable {
         case starting
@@ -34,6 +36,35 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
 
     private var session: ARSession?
 
+    /// 診断用：ARKit の状態（デバッグパネルが読む）。lock で保護。
+    struct Diagnostics {
+        var isSupported = false
+        var authorization = "未確認"
+        var sessionState = "未開始"
+        var frames = 0                    // 受け取った ARFrame の数
+        var lastFrameTime: TimeInterval?  // 最後のフレームの時刻（CACurrentMediaTime）
+        var lastAnchorCount = 0           // 直近フレームのアンカー総数
+        var lastFaceAnchorCount = 0       // 直近フレームの ARFaceAnchor の数
+        var lastFaceTracked: Bool?        // 直近の顔アンカーの isTracked
+        var cameraState = "—"             // frame.camera.trackingState
+        var lastError: String?
+        var interrupted = false
+        var videoFormats = 0              // ARFaceTrackingConfiguration.supportedVideoFormats の数
+    }
+    private var _diag = Diagnostics()
+    func diagnosticsSnapshot() -> Diagnostics { lock.lock(); defer { lock.unlock() }; return _diag }
+    private func updateDiag(_ f: (inout Diagnostics) -> Void) { lock.lock(); f(&_diag); lock.unlock() }
+
+    private static func authorizationText() -> String {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized: return "許可済み"
+        case .denied: return "拒否"
+        case .restricted: return "制限あり"
+        case .notDetermined: return "未決定"
+        @unknown default: return "不明"
+        }
+    }
+
     var statusText: String {
         switch mode {
         case .starting: return "顔トラッキングを準備中…"
@@ -45,17 +76,33 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     func start() {
-        guard ARFaceTrackingConfiguration.isSupported else {
+        // 二重起動の防止：onAppear が2回呼ばれても ARSession を2本走らせない（カメラの取り合いで顔が来なくなる）
+        guard session == nil else { return }
+        let supported = ARFaceTrackingConfiguration.isSupported
+        updateDiag {
+            $0.isSupported = supported
+            $0.authorization = Self.authorizationText()
+            $0.videoFormats = supported ? ARFaceTrackingConfiguration.supportedVideoFormats.count : 0
+        }
+        _ = Self.interfaceOrientation()   // メインスレッドで向きのキャッシュを初期化
+        guard supported else {
+            updateDiag { $0.sessionState = "非対応（isSupported = false）" }
             mode = .unsupported
             return
         }
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .denied, .restricted:
+            updateDiag { $0.sessionState = "カメラ権限なし" }
             mode = .denied
         case .notDetermined:
+            updateDiag { $0.sessionState = "権限の確認待ち" }
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 DispatchQueue.main.async {
-                    if granted { self?.runSession() } else { self?.mode = .denied }
+                    self?.updateDiag { $0.authorization = Self.authorizationText() }
+                    if granted { self?.runSession() } else {
+                        self?.updateDiag { $0.sessionState = "カメラ権限なし" }
+                        self?.mode = .denied
+                    }
                 }
             }
         default:
@@ -67,6 +114,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         session?.pause()
         session = nil
         setFace(active: false)
+        updateDiag { $0.sessionState = "停止"; $0.interrupted = false }
     }
 
     private func runSession() {
@@ -74,6 +122,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         session.delegate = self
         self.session = session
         mode = .searching
+        updateDiag { $0.sessionState = "実行中（フレーム待ち）"; $0.frames = 0; $0.lastFrameTime = nil; $0.lastError = nil }
         session.run(ARFaceTrackingConfiguration(), options: [.resetTracking, .removeExistingAnchors])
     }
 
@@ -84,13 +133,33 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     // MARK: - ARSessionDelegate
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        guard let face = frame.anchors.compactMap({ $0 as? ARFaceAnchor }).first, face.isTracked else {
+        let faces = frame.anchors.compactMap { $0 as? ARFaceAnchor }
+        let camState: String
+        switch frame.camera.trackingState {
+        case .normal: camState = "normal"
+        case .notAvailable: camState = "notAvailable"
+        case .limited(let r): camState = "limited(\(r))"
+        }
+        updateDiag {
+            $0.frames += 1
+            $0.lastFrameTime = CACurrentMediaTime()
+            $0.sessionState = "実行中"
+            $0.lastAnchorCount = frame.anchors.count
+            $0.lastFaceAnchorCount = faces.count
+            $0.lastFaceTracked = faces.first?.isTracked
+            $0.cameraState = camState
+        }
+        guard let face = faces.first, face.isTracked else {
             setFace(active: false)
             publish(.searching)
             return
         }
-        // 顔の位置をカメラ座標へ直す（カメラは端末と一緒に動くので、相対位置を取る）
-        let rel = simd_mul(simd_inverse(frame.camera.transform), face.transform).columns.3
+        // 目の位置＝左右の目の中点（顔アンカーのローカル座標 → ARKit のワールド座標）
+        let leftEye = simd_mul(face.transform, face.leftEyeTransform).columns.3
+        let rightEye = simd_mul(face.transform, face.rightEyeTransform).columns.3
+        let eyeMid = (leftEye + rightEye) * 0.5
+        // カメラ座標へ直す（カメラは端末と一緒に動くので、カメラから見た相対位置を取る）
+        let rel = simd_mul(simd_inverse(frame.camera.transform), eyeMid)
         // カメラ座標は「横向き（ホームボタン右）」基準。画面の向きに合わせて x/y を入れ替える
         var sx: Float = 0, sy: Float = 0
         switch Self.interfaceOrientation() {
@@ -99,7 +168,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         case .portraitUpsideDown:  (sx, sy) = (-rel.y, rel.x)
         default:                   (sx, sy) = (rel.y, -rel.x)   // 縦持ち
         }
-        // 顔はカメラの前（-z 側）にいるので、距離は -z。極端な値は丸める
+        // 目はカメラの前（-z 側）にいるので、距離は -z。極端な値は丸める
         let dist = min(max(abs(rel.z), 0.15), 0.9)
         lock.lock()
         _head = SIMD3<Float>(sx, sy, dist)
@@ -111,12 +180,23 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
 
     func session(_ session: ARSession, didFailWithError error: Error) {
         setFace(active: false)
+        updateDiag { $0.lastError = error.localizedDescription; $0.sessionState = "失敗" }
         // カメラ許可の取り消しなどで失敗した場合も、落とさずドラッグ操作へ切り替える
         publish(AVCaptureDevice.authorizationStatus(for: .video) == .authorized ? .unsupported : .denied)
     }
 
+    func sessionWasInterrupted(_ session: ARSession) {
+        setFace(active: false)
+        updateDiag { $0.interrupted = true; $0.sessionState = "中断中" }
+    }
+
+    func sessionInterruptionEnded(_ session: ARSession) {
+        updateDiag { $0.interrupted = false; $0.sessionState = "実行中（再開）" }
+    }
+
     private func publish(_ new: Mode) {
         DispatchQueue.main.async { [weak self] in
+            _ = Self.interfaceOrientation()   // 向きのキャッシュを更新（描画側の読み取りはメイン以外）
             if self?.mode != new { self?.mode = new }
         }
     }
