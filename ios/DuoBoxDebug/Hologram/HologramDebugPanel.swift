@@ -58,8 +58,9 @@ final class HologramDiagnostics: ObservableObject {
     @Published var showGrid = true
     /// 機種プロファイル
     @Published var profileID = ""
-    @Published var profileIsFallback = true
-    @Published var mmPerPt: Double = 0
+    /// 読み取ったカメラ位置を含むプロファイル
+    @Published var cameraProfile = HologramDeviceProfile.current()
+    @Published var mmPerPt: Double = HologramDeviceProfile.mmPerPoint
     /// 折り目のY位置（reserved regions が取れなければ nil＝画面中央で代用中）
     @Published var foldY: CGFloat?
     @Published var materialFound = 0
@@ -143,17 +144,17 @@ struct HologramDebugPanel: View {
         return VStack(alignment: .leading, spacing: 3) {
             Text("② 端末情報").font(.subheadline.bold())
             row("hw.machine", HologramDeviceProfile.readMachineID())
-            row("プロファイル", diagnostics.profileIsFallback
-                ? "未実測（近似）\(String(format: "%.4f", diagnostics.mmPerPt)) mm/pt"
-                : "実測値 \(String(format: "%.4f", diagnostics.mmPerPt)) mm/pt")
+            row("1pt あたり", "\(String(format: "%.3f", diagnostics.mmPerPt)) mm（iPhone Duo 実寸）")
             row("bounds", "\(fmt(b.width)) × \(fmt(b.height)) pt")
             row("nativeBounds", "\(fmt(nb.width)) × \(fmt(nb.height)) px")
             row("nativeScale", fmt(screen.nativeScale))
             if let fold = diagnostics.foldY {
-                row("折り目Y", "\(fmt(fold)) pt")
+                row("折り目Y", "\(fmt(fold)) pt ／ \(String(format: "%.1f", Double(fold) * diagnostics.mmPerPt)) mm")
             } else {
-                row("折り目Y", "取得なし（画面中央で代用）")
+                let fold = diagnostics.cameraProfile.foldYPt
+                row("折り目Y", "取得なし（画面中央で代用：\(fmt(fold)) pt ／ \(String(format: "%.1f", Double(fold) * diagnostics.mmPerPt)) mm）")
             }
+            cameraRows
             if let deg = hinge.angleDegrees {
                 row("ヒンジ角度", "\(fmt(CGFloat(deg)))°")
             } else {
@@ -162,6 +163,28 @@ struct HologramDebugPanel: View {
             row("材質", "総数 \(diagnostics.materialTotal)／修正対象 \(diagnostics.materialFound)/2 見つかった")
         }
         .font(.system(.footnote, design: .monospaced))
+    }
+
+    /// 読み取ったカメラ位置（pt と mm、上端・折り目・横中央からの距離）
+    @ViewBuilder private var cameraRows: some View {
+        let p = diagnostics.cameraProfile
+        let mm = HologramDeviceProfile.mmPerPoint
+        switch p.cameraSource {
+        case .occlusion:
+            row("カメラ位置", "occlusion から取得")
+        case .fallback:
+            row("カメラ位置", "カメラ位置：既定値（上端から \(String(format: "%.1f", p.cameraBelowTopMM)) mm、横中央）")
+        case .lowerPanel:
+            Text("カメラが下側：向きを変えてください").foregroundStyle(.red)
+        }
+        if let c = p.cameraCenterPt {
+            row("カメラ中心", "x \(fmt(c.x)) y \(fmt(c.y)) pt")
+            row("上端から", "\(fmt(c.y)) pt ／ \(String(format: "%.1f", Double(c.y) * mm)) mm")
+            let above = p.foldYPt - c.y
+            row("折り目から（上が正）", "\(fmt(above)) pt ／ \(String(format: "%.1f", Double(above) * mm)) mm")
+            let right = c.x - p.viewWidthPt / 2
+            row("横中央から（右が正）", "\(fmt(right)) pt ／ \(String(format: "%.1f", Double(right) * mm)) mm")
+        }
     }
 
     private func row(_ name: String, _ value: String) -> some View {
@@ -189,8 +212,12 @@ struct HologramDebugPanel: View {
                 .font(.caption)
             Text("前後位置 p（手動）: \(String(format: "%.2f", diagnostics.pPos))（0＝手前の端、1＝折り目、1超＝床の角まで）")
                 .font(.caption)
-            Slider(value: $diagnostics.pPos, in: 0...1.6, step: 0.01)
-                .disabled(diagnostics.pAuto)
+            // 上限は床の角（pMax）。折り角と wallRecess で変わるので現在値を読む
+            TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                let pMax = Double(diagnostics.rig?.snapshot.pMax ?? 1.6)
+                Slider(value: $diagnostics.pPos, in: 0...max(pMax, 0.01), step: 0.01)
+                    .disabled(diagnostics.pAuto)
+            }
             Toggle("向き w は角度で自動（110°で 0 → 170°で 1）", isOn: $diagnostics.wAuto)
                 .font(.caption)
             Text("向き w（手動）: \(String(format: "%.2f", diagnostics.wLean))（0＝床に垂直、1＝真上）")
@@ -275,6 +302,8 @@ struct HologramDebugPanel: View {
                 let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
                 VStack(alignment: .leading, spacing: 3) {
                     row("真の生値 rel(m)", String(format: "x%+.3f y%+.3f z%+.3f", r.x, r.y, r.z))
+                    row("rel.z（符号つき）", String(format: "%+.3f m", r.z))
+                    row("距離 |rel.z| クランプ前／後", String(format: "%.3f ／ %.3f m", tracker.rawDistance, h.z))
                     row("変換後 head(m)", String(format: "x%+.3f y%+.3f z%+.3f", h.x, h.y, h.z))
                     row("軸対応後(m)", String(format: "x%+.3f y%+.3f z%+.3f", mp.x, mp.y, mp.z))
                     row("シーン座標(m)", String(format: "x%+.3f y%+.3f z%+.3f", s.eye.x, s.eye.y, s.eye.z))
@@ -342,27 +371,22 @@ struct HologramDebugPanel: View {
                 let labels = ["頭", "足", "台座の縁", "体の左右", "高さ 1/4", "高さ 1/2", "高さ 3/4"]
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(0..<labels.count, id: \.self) { i in
-                        marginRow(labels[i],
-                                  upper: i < s.marginUpperMM.count ? s.marginUpperMM[i] : .nan,
-                                  lower: i < s.marginLowerMM.count ? s.marginLowerMM[i] : .nan)
+                        marginRow(labels[i], value: i < s.marginsMM.count ? s.marginsMM[i] : .nan)
                     }
                 }
                 .font(.system(.footnote, design: .monospaced))
             }
-            Text("上＝上パネルの上端と左右、下＝下パネルの手前の端と左右までの余裕。折り目側の辺は数えない。— はその窓では数えられない点")
+            Text("点ごとに、数えられる窓（上パネルの上端と左右／下パネルの手前の端と左右）のうち大きい方の余裕を取り、グループ内の最小を出す。折り目側の辺は数えない。負は赤。— はどの窓でも数えられない")
                 .font(.caption2).foregroundStyle(.white.opacity(0.7))
         }
     }
 
-    private func marginRow(_ name: String, upper: Float, lower: Float) -> some View {
-        let vals = [upper, lower].filter { !$0.isNaN }
-        let worst = vals.min() ?? 0
-        func f(_ v: Float) -> String { v.isNaN ? "—" : String(format: "%+.0f", v) }
-        return HStack(alignment: .top) {
+    private func marginRow(_ name: String, value: Float) -> some View {
+        HStack(alignment: .top) {
             Text(name).foregroundStyle(.white.opacity(0.6))
             Spacer(minLength: 8)
-            Text("上 \(f(upper)) ／ 下 \(f(lower))")
-                .foregroundStyle(!vals.isEmpty && worst < 0 ? .red : .white)
+            Text(value.isNaN ? "—" : String(format: "%+.0f", value))
+                .foregroundStyle(!value.isNaN && value < 0 ? .red : .white)
         }
     }
 
@@ -395,7 +419,7 @@ struct HologramDebugPanel: View {
                     }
                 }
             }
-            Text("記録がある角度の範囲では、p と w の既定値が角度で線形補間される。範囲の外と記録がないときは既定（p=0.5、w は角度の smoothstep）")
+            Text("記録できる角度は実機では約15°〜145°と全開（180°）。記録の間は p と w の既定値を角度で線形補間し、範囲の外は両端の記録の値を保つ（記録が1件なら全角度でその値）。記録がないときは既定（p=0.5、w は角度の smoothstep）")
                 .font(.caption2).foregroundStyle(.white.opacity(0.7))
         }
     }

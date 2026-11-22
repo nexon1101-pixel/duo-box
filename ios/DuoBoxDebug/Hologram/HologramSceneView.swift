@@ -25,10 +25,29 @@ final class HologramRig {
 
     var tracker: HeadTracker?
     var hinge: HingeMonitor?
-    /// 機種プロファイル（実寸とカメラ位置）。container が設定する
-    var profile = HologramDeviceProfile.current()
-    /// ドラッグ用の手動視点：基準の目の位置からのずれ（x, y のみ使う）
-    var manual = SIMD3<Float>(0, 0, 0)
+    /// 機種プロファイル（実寸とカメラ位置）。描画スレッド専用のコピーで、update の頭で Layout から移す
+    private var profile = HologramDeviceProfile.current()
+
+    /// main が渡し、描画スレッドが update の頭で一度だけ読む寸法とプロファイル（tuneLock で保護）
+    struct Layout: Equatable {
+        var width: Float
+        var upperH: Float
+        var lowerH: Float
+        var profile: HologramDeviceProfile
+    }
+    private var _layout: Layout?
+    func setLayout(_ l: Layout) { tuneLock.lock(); _layout = l; tuneLock.unlock() }
+    private var layout: Layout? { tuneLock.lock(); defer { tuneLock.unlock() }; return _layout }
+
+    /// ドラッグ用の手動視点：基準の目の位置からのずれ（x, y のみ使う。tuneLock で保護）
+    private var _manual = SIMD3<Float>(0, 0, 0)
+    private var manual: SIMD3<Float> { tuneLock.lock(); defer { tuneLock.unlock() }; return _manual }
+    func addManual(dx: Float, dy: Float) {
+        tuneLock.lock()
+        _manual.x = min(max(_manual.x + dx, -0.12), 0.12)
+        _manual.y = min(max(_manual.y + dy, -0.12), 0.12)
+        tuneLock.unlock()
+    }
 
     /// モデルの正面が floorFrame の +z（+d）を向くための y 回転。モデル正面は +Z なので 0
     static let modelFrontYaw: Float = 0
@@ -69,20 +88,21 @@ final class HologramRig {
     func setPWTable(_ t: [(angle: Float, p: Float, w: Float)]) { tuneLock.lock(); _pwTable = t; tuneLock.unlock() }
     private var pwTable: [(angle: Float, p: Float, w: Float)] { tuneLock.lock(); defer { tuneLock.unlock() }; return _pwTable }
 
-    /// 記録表から角度に対する p・w を線形補間する。表が空、または角度が記録の範囲外なら nil
+    /// 記録表から角度に対する p・w を線形補間する。範囲の外は角度を範囲に丸めて両端の値を保つ。
+    /// 記録が1件ならその値を全角度で使う。nil を返すのは記録が0件のときだけ
     private func pwInterp(angleDeg: Float) -> (p: Float, w: Float)? {
         let t = pwTable
-        guard let first = t.first, let last = t.last,
-              angleDeg >= first.angle, angleDeg <= last.angle else { return nil }
+        guard let first = t.first, let last = t.last else { return nil }
         if t.count == 1 { return (first.p, first.w) }
+        let angle = min(max(angleDeg, first.angle), last.angle)
         for i in 0..<(t.count - 1) {
             let a = t[i], b = t[i + 1]
-            if angleDeg >= a.angle && angleDeg <= b.angle {
-                let f = b.angle > a.angle ? (angleDeg - a.angle) / (b.angle - a.angle) : 0
+            if angle >= a.angle && angle <= b.angle {
+                let f = b.angle > a.angle ? (angle - a.angle) / (b.angle - a.angle) : 0
                 return (a.p + (b.p - a.p) * f, a.w + (b.w - a.w) * f)
             }
         }
-        return nil
+        return (last.p, last.w)
     }
     private var _showMarkers = false        // 位置合わせマーカーの表示
     func setShowMarkers(_ v: Bool) { tuneLock.lock(); _showMarkers = v; tuneLock.unlock() }
@@ -138,6 +158,8 @@ final class HologramRig {
         private var initialized = false
 
         mutating func filter(_ x: SIMD3<Float>, dt: Float, minCutoff: Float, beta: Float, dCutoff: Float) -> SIMD3<Float> {
+            // 有限でない入力は捨てて前の状態を保つ（状態が NaN で固まらないように）
+            guard x.x.isFinite, x.y.isFinite, x.z.isFinite else { return xHat }
             let dtc = max(dt, 0.001)
             if !initialized { xHat = x; prevX = x; initialized = true; return x }
             let dx = (x - prevX) / dtc
@@ -147,6 +169,9 @@ final class HologramRig {
                 let cutoff = minCutoff + beta * abs(dxHat[i])
                 xHat[i] += (x[i] - xHat[i]) * Self.alpha(cutoff: cutoff, dt: dtc)
             }
+            // 万一状態が有限でなくなったら、いまの入力から立て直す
+            let ok = (0..<3).allSatisfy { xHat[$0].isFinite && dxHat[$0].isFinite }
+            if !ok { xHat = x; dxHat = .zero }
             return xHat
         }
 
@@ -162,6 +187,21 @@ final class HologramRig {
     /// 顔ロスト時の保持用：最後に顔で決まった目の目標と、ロストが始まった時刻
     private var lastFaceTarget: SIMD3<Float>?
     private var faceLostSince: TimeInterval?
+    /// 最後に使えた目の目標（有限でない入力が来たときに保つ値）
+    private var lastValidTarget: SIMD3<Float>?
+    /// 補間で得た p・w の既定値を平滑化した状態（記録が0件なら nil）
+    private var smoothedPW: (p: Float, w: Float)?
+    /// 自動身長の平滑化状態と、再計算を省くための前回の入力・生の結果
+    private var smoothedAutoH: Float?
+    private struct FitKey: Equatable {
+        var angle: Int32, p: Int32, w: Int32
+        var width: Float, upperH: Float, lowerH: Float
+        var eye: SIMD3<Int32>
+    }
+    private var lastFitKey: FitKey?
+    private var lastFitRaw: Float = 0
+    /// 身長の下限（m）。これ未満にはしない
+    private let minCharHeight: Float = 0.020
 
     /// 下パネルの投影が成り立っているか（目が裏側に回ると false）。描画スレッドで更新
     private(set) var lowerValid = true
@@ -177,8 +217,12 @@ final class HologramRig {
         var wEff: Float = 0
         var lowerEyeHeightMM: Float = 0
         var lowerValid = true
-        var marginUpperMM: [Float] = []   // 見切れ余裕（上パネル、mm）。並びは [頭, 足, 台座の縁, 体の左右, 1/4, 1/2, 3/4]、数えられない点は NaN
-        var marginLowerMM: [Float] = []   // 見切れ余裕（下パネル、mm）
+        /// 見切れ余裕（mm）。並びは [頭, 足, 台座の縁, 体の左右, 1/4, 1/2, 3/4]。
+        /// 点ごとに数えられる窓のうち大きい方（windowMargin）を取り、グループ内で最小。どの窓でも数えられなければ NaN
+        var marginsMM: [Float] = []
+        var pMax: Float = 1.6             // p の上限（床の角）
+        var materialFound = 0
+        var materialTotal = 0
     }
     private let snapLock = NSLock()
     private var _snap = Snapshot()
@@ -206,11 +250,12 @@ final class HologramRig {
         scene.rootNode.addChildNode(key)
     }
 
-    /// 上下のパネルの大きさ（メートル）。変わったときだけ作り直す。
+    /// main から渡された寸法とプロファイルを、描画スレッドのフレーム冒頭で取り込む。変わったときだけ作り直す。
     /// ただし 0.2mm 未満の変化では作り直さない（折り目位置の微振動で全体が再構築されるのを防ぐ歯止め）。
-    func configure(width: Float, upperH: Float, lowerH: Float) {
-        self.width = width; self.upperH = upperH; self.lowerH = lowerH
-        let key = SIMD3(width, upperH, lowerH)
+    private func applyLayout() {
+        guard let l = layout else { return }
+        width = l.width; upperH = l.upperH; lowerH = l.lowerH; profile = l.profile
+        let key = SIMD3(l.width, l.upperH, l.lowerH)
         if key != builtFor {
             let d = abs(key - builtFor)
             if d.x < 0.0002 && d.y < 0.0002 && d.z < 0.0002 { return }
@@ -225,11 +270,17 @@ final class HologramRig {
     /// th = π で d = (0,-1,0)（上パネルと同一平面）、th = π/2 で d = (0,0,1)（手前へ倒れた L 字）。
     private func lowerPlane(angle th: Float) -> (d: SIMD3<Float>, center: SIMD3<Float>, up: SIMD3<Float>, normal: SIMD3<Float>) {
         let d = SIMD3<Float>(0, cos(th), sin(th))
-        return (d, d * (lowerH / 2), -d, SIMD3<Float>(0, sin(th), -cos(th)))
+        // 下パネルの面はヒンジ軸を通り、表示領域は軸から hingeToLowerEdge 先から始まる
+        return (d, d * (profile.hingeToLowerEdge + lowerH / 2), -d, SIMD3<Float>(0, sin(th), -cos(th)))
     }
 
-    /// 基準の目の位置（上パネル座標）。画面の少し上、30〜40cm 手前を想定
-    private var nominalEye: SIMD3<Float> { SIMD3<Float>(profile.cameraRight, upperH + 0.02, 0.36) }
+    /// カメラの位置（上パネル座標、折り目原点・上向き正）。カメラは上パネルの内側にある
+    private var cameraPosition: SIMD3<Float> {
+        SIMD3<Float>(profile.cameraRight, upperH - profile.cameraBelowTop, 0)
+    }
+
+    /// 基準の目の位置（上パネル座標）。カメラの少し上、30〜40cm 手前を想定
+    private var nominalEye: SIMD3<Float> { cameraPosition + SIMD3<Float>(0, 0.024, 0.36) }
 
     /// ビルド時の基準身長（モデルの拡縮の基準値）。実際の身長は update() で自動決定する
     private func defaultCharHeight() -> Float { lowerH * 1.0 }
@@ -252,8 +303,9 @@ final class HologramRig {
             let t = simd_dot(-E, n) / denom
             if t > 0 {
                 let q = E + (P - E) * t                   // 下パネル面との交点
-                let v = simd_dot(q, d)                    // 折り目からの距離
-                if v >= 0 { lower = min(lowerH - v, q.x + width / 2, width / 2 - q.x) }
+                let v = simd_dot(q, d)                    // ヒンジ軸からの距離
+                let edge = profile.hingeToLowerEdge       // 下パネルの表示はここから始まる
+                if v >= edge { lower = min(edge + lowerH - v, q.x + width / 2, width / 2 - q.x) }
             }
         }
         return (upper, lower)
@@ -277,7 +329,7 @@ final class HologramRig {
     /// 折り角・立ち位置・向きが変わると結果も変わるので、update() から毎フレーム呼ぶ。
     private func fittedHeight(stand S: SIMD3<Float>, up u: SIMD3<Float>,
                               d: SIMD3<Float>, n: SIMD3<Float>, eye: SIMD3<Float>) -> Float {
-        let target = 0.6 * min(upperH, lowerH)
+        let target = max(0.6 * min(upperH, lowerH), minCharHeight)
         let base = S + n * padHeight                       // 足の位置（台座の上面）
         var eyes: [SIMD3<Float>] = [eye]
         for x in [Float(-0.06), 0, 0.06] { for y in [Float(0.03), 0.125, 0.22] { for z in [Float(0.25), 0.45] {
@@ -296,12 +348,29 @@ final class HologramRig {
             return m
         }
         if minMargin(target) >= 0.008 { return target }
-        var lo: Float = 0.01, hi = target
+        var lo: Float = minCharHeight, hi = target
         for _ in 0..<20 {
             let mid = (lo + hi) / 2
             if minMargin(mid) >= 0.008 { lo = mid } else { hi = mid }
         }
         return lo
+    }
+
+    /// 入力（角度 0.1°、p・w 0.005、目 2mm に量子化、寸法はそのまま）が前回と同じなら、前回の生の結果を使い回す
+    private func cachedFittedHeight(stand S: SIMD3<Float>, up u: SIMD3<Float>,
+                                    d: SIMD3<Float>, n: SIMD3<Float>, eye: SIMD3<Float>,
+                                    angleDeg: Float, p: Float, w: Float) -> Float {
+        // Int32 への変換は NaN や範囲外で落ちるので、必ず有限・範囲内にしてから変換する
+        func qi(_ v: Float) -> Int32 { v.isFinite ? Int32(min(max(v.rounded(), -1e9), 1e9)) : 0 }
+        let q = (eye / 0.002).rounded(.toNearestOrAwayFromZero)
+        let key = FitKey(angle: qi(angleDeg * 10), p: qi(p * 200), w: qi(w * 200),
+                         width: width, upperH: upperH, lowerH: lowerH,
+                         eye: SIMD3<Int32>(qi(q.x), qi(q.y), qi(q.z)))
+        if key == lastFitKey { return lastFitRaw }
+        let raw = fittedHeight(stand: S, up: u, d: d, n: n, eye: q * 0.002)
+        lastFitKey = key
+        lastFitRaw = raw
+        return raw
     }
 
     // MARK: - シーン構築
@@ -638,6 +707,7 @@ final class HologramRig {
     /// 同じ時刻の呼び出しは最初の1回だけ計算し、もう一方の view はその結果をそのまま描く
     private var lastComputedTime: TimeInterval = -1
     private let frameLock = NSLock()
+    private var lastCameraCheck: TimeInterval = -1
     func updateForFrame(time: TimeInterval) {
         frameLock.lock()
         if time != lastComputedTime {
@@ -647,8 +717,19 @@ final class HologramRig {
         frameLock.unlock()
     }
 
+    /// カメラ位置（occlusion）を読み直す時刻か。両画面のデリゲートから呼ばれても約1秒に1回だけ true を返す
+    func takeCameraRefreshTick(time: TimeInterval) -> Bool {
+        frameLock.lock(); defer { frameLock.unlock() }
+        if lastCameraCheck >= 0 && time - lastCameraCheck < 1 { return false }
+        lastCameraCheck = time
+        return true
+    }
+
     /// 視点・折り角度を平滑化し、床の枠と2つのカメラの投影を更新する。
     func update(time: TimeInterval) {
+        // 寸法とプロファイルはフレーム冒頭で一度だけ取り込む。作り直しもここ（描画スレッド）でだけ行う
+        applyLayout()
+        let man = manual
         let dt = lastTime == 0 ? 1.0 / 60 : min(time - lastTime, 0.1)
         lastTime = time
         let k = Float(1 - exp(-dt * 12))
@@ -660,36 +741,46 @@ final class HologramRig {
         if let tracker, tracker.faceActive {
             // 絶対位置のみ（手順4）：目の位置 = カメラの位置（機種プロファイル）+ 軸対応を適用した目位置。
             // ホーム基準と視差ゲインは廃止。目の絶対位置のずれは機種プロファイル側で吸収する。
-            let camOffset = SIMD3<Float>(profile.cameraRight, upperH + profile.cameraAboveTopEdge, 0)
-            target = camOffset + tracker.mappedHead
-            lastFaceTarget = target
-            faceLostSince = nil
+            let candidate = cameraPosition + tracker.mappedHead
+            if candidate.x.isFinite && candidate.y.isFinite && candidate.z.isFinite {
+                target = candidate
+                lastFaceTarget = candidate
+                faceLostSince = nil
+            } else {
+                target = lastValidTarget ?? nominalEye   // 有限でない入力は捨てて前の状態を保つ
+            }
         } else if let last = lastFaceTarget {
             // 顔が見えなくなったら基準へ即座に戻さず、最後の位置を 1.5 秒保ち、
             // その後 2.5 秒かけて基準の目の位置へゆっくり戻す。戻り切ったら保持を解く。
             if faceLostSince == nil { faceLostSince = time }
             let lost = time - (faceLostSince ?? time)
             if lost <= 1.5 {
-                target = last + SIMD3<Float>(manual.x, manual.y, 0)
+                target = last + SIMD3<Float>(man.x, man.y, 0)
             } else {
                 let f = min(Float((lost - 1.5) / 2.5), 1)
-                target = nominalEye + (last - nominalEye) * (1 - f) + SIMD3<Float>(manual.x, manual.y, 0)
+                target = nominalEye + (last - nominalEye) * (1 - f) + SIMD3<Float>(man.x, man.y, 0)
                 if f >= 1 { lastFaceTarget = nil; faceLostSince = nil }
             }
         } else {
-            target = nominalEye + SIMD3<Float>(manual.x, manual.y, 0)
+            target = nominalEye + SIMD3<Float>(man.x, man.y, 0)
         }
+        lastValidTarget = target
         // 平滑化は 1€ フィルタ（手順5）。さらに速度×先読み時間だけ先の位置を出して表示までの遅れを埋める
         let filtered = eyeFilter.filter(target, dt: Float(dt), minCutoff: oeMinCutoff, beta: oeBeta, dCutoff: 1.0)
         let predicted = filtered + eyeFilter.dxHat * oePred
         let eye = SIMD3<Float>(predicted.x, predicted.y, max(predicted.z, 0.1))
 
         // 折り角度：取れなければ全開 180°（＝従来の単一平面）。ライブ更新に追従
-        let angleTarget = Float(min(max(hinge?.radians ?? .pi, .pi / 6), .pi))
-        smoothedAngle += (angleTarget - smoothedAngle) * k
+        let angleInput = hinge?.radians ?? .pi
+        if angleInput.isFinite {                    // 有限でない入力は捨てて前の角度を保つ
+            let angleTarget = Float(min(max(angleInput, .pi / 6), .pi))
+            smoothedAngle += (angleTarget - smoothedAngle) * k
+        }
         let th = smoothedAngle
 
         let lower = lowerPlane(angle: th)
+        let lowerEdge = profile.hingeToLowerEdge    // ヒンジ軸から下パネルの折り目側の端まで
+        let frameZ0 = lowerEdge + lowerH / 2        // floorFrame の原点（下パネル中央）のヒンジ軸からの距離
 
         // 床の枠：下パネルの面に合わせる（x=右、y=法線、z=端へ向かう向き。右手系）。原点は下パネルの中央
         floorFrame.simdTransform = simd_float4x4(columns: (
@@ -704,25 +795,35 @@ final class HologramRig {
         wallNode.simdScale = SIMD3(1, wallH, 1)
         wallShade.simdPosition = SIMD3(0, yC + 0.015, -recess + 0.0003)
         // 床は角から下パネルの手前の端（＋2cm）まで
-        let floorEnd = lowerH + 0.02
+        let floorEnd = lowerEdge + lowerH + 0.02
         let floorLen = max(floorEnd - sC, 0.01)
-        floorNode.simdPosition = SIMD3(0, 0, (sC + floorEnd) / 2 - lowerH / 2)
+        floorNode.simdPosition = SIMD3(0, 0, (sC + floorEnd) / 2 - frameZ0)
         floorNode.simdScale = SIMD3(1, floorLen, 1)
-        floorShade.simdPosition = SIMD3(0, 0.0003, sC + 0.015 - lowerH / 2)
+        floorShade.simdPosition = SIMD3(0, 0.0003, sC + 0.015 - frameZ0)
 
-        // 立ち位置：p（0＝手前の端、1＝折り目、1超は床の角まで）を、折り目からの距離へ直して置く
-        let floorDepth = max(lowerH - sC, 0.01)
-        let pMax = 1 + (-sC) / lowerH
+        // 立ち位置：p（0＝手前の端、1＝下パネルの折り目側の端、1超は床の角まで）を、距離へ直して置く
+        let floorDepth = max(lowerEdge + lowerH - sC, 0.01)
+        let pMax = 1 + (lowerEdge - sC) / lowerH
         let angleDegNow = th * 180 / .pi
-        let pwNow = pwInterp(angleDeg: angleDegNow)
+        // 記録の補間値は k で平滑化してから既定値に使う（手動スライダーの値は平滑化しない）
+        if let pw = pwInterp(angleDeg: angleDegNow) {
+            if let s = smoothedPW {
+                smoothedPW = (s.p + (pw.p - s.p) * k, s.w + (pw.w - s.w) * k)
+            } else {
+                smoothedPW = pw
+            }
+        } else {
+            smoothedPW = nil
+        }
+        let pwNow = smoothedPW
         let pBase = pAuto ? (pwNow?.p ?? 0.5) : pPos
         let pEff = min(max(pBase, 0), pMax)
-        let distFold = (1 - pEff) * lowerH    // 折り目から手前方向への距離（負＝折り目より奥）
-        standNode.simdPosition = SIMD3(0, 0, distFold - lowerH / 2)
+        let distFold = (1 - pEff) * lowerH    // 下パネルの折り目側の端から手前方向への距離（負＝端より奥）
+        standNode.simdPosition = SIMD3(0, 0, lowerEdge + distFold - frameZ0)
         // 部屋の手がかり：巾木・床のライン・壁の枠
         baseboardNode.simdPosition = SIMD3(0, yC + 0.002, -recess + 0.0004)
         for l in floorLines {
-            l.node.simdPosition = SIMD3(0, 0.0002, sC - lowerH / 2 + l.frac * floorDepth)
+            l.node.simdPosition = SIMD3(0, 0.0002, sC - frameZ0 + l.frac * floorDepth)
         }
         let frameBottom = yC + max(upperH * 0.06, 0.006)
         wallFrameNode.simdPosition = SIMD3(0, frameBottom + wallFrameH / 2, -recess + 0.0005)
@@ -743,11 +844,11 @@ final class HologramRig {
             g.node.isHidden = !gs
         }
         for g in gridFloorH {
-            g.node.simdPosition = SIMD3(0, 0.0002, sC - lowerH / 2 + g.k * gridStep)
+            g.node.simdPosition = SIMD3(0, 0.0002, sC - frameZ0 + g.k * gridStep)
             g.node.isHidden = !gs
         }
         for g in gridFloorV {
-            g.node.simdPosition = SIMD3(g.k * gridStep, 0.0002, (sC + floorEnd) / 2 - lowerH / 2)
+            g.node.simdPosition = SIMD3(g.k * gridStep, 0.0002, (sC + floorEnd) / 2 - frameZ0)
             g.node.simdScale = SIMD3(1, floorLen, 1)
             g.node.isHidden = !gs
         }
@@ -769,7 +870,10 @@ final class HologramRig {
 
         // 身長は自動決定（0.6×小さい方のパネル高が既定、余裕 8mm を切る分だけ縮小）。手動の倍率はその上に掛かる
         let standWorld = lower.center + lower.d * standNode.simdPosition.z
-        let autoH = fittedHeight(stand: standWorld, up: upW, d: lower.d, n: lower.normal, eye: eye)
+        let rawAutoH = cachedFittedHeight(stand: standWorld, up: upW, d: lower.d, n: lower.normal, eye: eye,
+                                          angleDeg: angleDegNow, p: pEff, w: wEff)
+        let autoH = smoothedAutoH.map { $0 + (rawAutoH - $0) * k } ?? rawAutoH
+        smoothedAutoH = autoH
         let hs = baseCharHeight > 0.001 ? (autoH * heightScale) / baseCharHeight : 1
         idleNode.simdScale = SIMD3(hs, hs, hs)
         padNode.simdScale = SIMD3(hs, 1, hs)   // 台座の半径も身長に連動（厚みは変えない）
@@ -799,7 +903,7 @@ final class HologramRig {
             padPct = (1 - (cap(padR, distFold) + cap(padR, lowerH - distFold)) / (.pi * padR * padR)) * 100
         } else { padPct = (distFold >= 0 && distFold <= lowerH) ? 100 : 0 }
 
-        // 見切れ余裕（表示用）：いまの目の位置で各点を窓へ投影した余裕（mm、数えられない窓は NaN）
+        // 見切れ余裕（表示用）：点ごとに windowMargin（fittedHeight と同じ）を取り、グループ内の最小（mm）。数えられなければ NaN
         let effH = baseCharHeight * hs
         let baseP = standWorld + lower.normal * padHeight
         let rimR = effH * 0.32
@@ -814,17 +918,9 @@ final class HologramRig {
             [baseP + upW * (effH * 0.5)],                                    // 高さ 1/2
             [baseP + upW * (effH * 0.75)],                                   // 高さ 3/4
         ]
-        var marginUpperMM: [Float] = []
-        var marginLowerMM: [Float] = []
-        for g in marginGroups {
-            var u: Float? = nil, l: Float? = nil
-            for p in g {
-                let m = windowMargins(p, eye: eye, d: lower.d, n: lower.normal)
-                if let v = m.upper { u = u.map { min($0, v) } ?? v }
-                if let v = m.lower { l = l.map { min($0, v) } ?? v }
-            }
-            marginUpperMM.append((u ?? .nan) * 1000)
-            marginLowerMM.append((l ?? .nan) * 1000)
+        let marginsMM: [Float] = marginGroups.map { g in
+            let vals = g.compactMap { windowMargin($0, eye: eye, d: lower.d, n: lower.normal) }
+            return (vals.min() ?? .nan) * 1000
         }
 
         snapLock.lock()
@@ -834,7 +930,8 @@ final class HologramRig {
                          pEff: pEff, padPct: padPct, wEff: wEff,
                          lowerEyeHeightMM: simd_dot(eye - lower.center, lower.normal) * 1000,
                          lowerValid: lowerValid,
-                         marginUpperMM: marginUpperMM, marginLowerMM: marginLowerMM)
+                         marginsMM: marginsMM, pMax: pMax,
+                         materialFound: materialFound, materialTotal: materialTotal)
         snapLock.unlock()
     }
 
@@ -915,12 +1012,19 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
             diagnostics.$wallRecessMM.sink { [weak self] v in self?.rig.setWallRecess(Float(v) / 1000) }
                 .store(in: &cancellables)
             diagnostics.$pPos.sink { [weak self] v in self?.rig.setPPos(Float(v)) }
+                .store(in: &cancellables)
             diagnostics.$wAuto.sink { [weak self] v in self?.rig.setWAuto(v) }
+                .store(in: &cancellables)
             diagnostics.$wLean.sink { [weak self] v in self?.rig.setWLean(Float(v)) }
+                .store(in: &cancellables)
             diagnostics.$oeMinCutoff.sink { [weak self] v in self?.rig.setOneEuroMinCutoff(Float(v)) }
+                .store(in: &cancellables)
             diagnostics.$oeBeta.sink { [weak self] v in self?.rig.setOneEuroBeta(Float(v)) }
+                .store(in: &cancellables)
             diagnostics.$oePredMS.sink { [weak self] v in self?.rig.setOneEuroPred(Float(v) / 1000) }
+                .store(in: &cancellables)
             diagnostics.$pAuto.sink { [weak self] v in self?.rig.setPAuto(v) }
+                .store(in: &cancellables)
             diagnostics.$pwRecords.sink { [weak self] recs in
                 self?.rig.setPWTable(recs.map { (angle: Float($0.angleDeg), p: Float($0.p), w: Float($0.w)) })
             }
@@ -990,26 +1094,37 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
         upperView.frame = CGRect(x: 0, y: 0, width: bounds.width, height: fold)
         lowerView.frame = CGRect(x: 0, y: fold, width: bounds.width, height: bounds.height - fold)
 
-        // ポイント → メートル。機種プロファイルの実寸（未実測なら短辺 65mm の近似）。上下で同じ尺度を使う
-        let profile = HologramDeviceProfile.current()
-        rig.profile = profile
-        let mpp = profile.metersPerPoint(boundsShortSide: min(bounds.width, bounds.height))
-        rig.configure(width: Float(bounds.width) * mpp,
-                      upperH: Float(fold) * mpp,
-                      lowerH: Float(bounds.height - fold) * mpp)
+        layoutFold = fold
+        pushLayout()
+    }
 
-        // 計測パネルへ：折り目のY位置（取れなければ nil）、材質の数
+    /// 折り目の位置（layoutSubviews で決めた値）。main 専用
+    private var layoutFold: CGFloat = 0
+
+    /// occlusion を読み直して、寸法とプロファイルを描画側へ渡す（main 専用）。
+    /// rig は次のフレームの頭でこの値を取り込むので、ここからは作り直さない
+    private func pushLayout() {
+        guard bounds.width > 0, bounds.height > 0, layoutFold > 0 else { return }
+        let fold = layoutFold
+        let profile = HologramDeviceProfile.current()
+            .resolved(occlusion: hinge?.occlusionFrame(in: self), foldY: fold, viewSize: bounds.size)
+        let mpp = profile.metersPerPoint
+        rig.setLayout(.init(width: Float(bounds.width) * mpp,
+                            upperH: Float(fold) * mpp,
+                            lowerH: Float(bounds.height - fold) * mpp,
+                            profile: profile))
+
+        // 計測パネルへ：折り目のY位置（取れなければ nil）、カメラ位置、材質の数
         let reportedFold: CGFloat? = hinge?.foldY(in: self)
-        let found = rig.materialFound, total = rig.materialTotal
-        let mppValue = mpp
+        let snap = rig.snapshot
         DispatchQueue.main.async { [weak self] in
             guard let d = self?.diagnostics else { return }
-            d.foldY = reportedFold
-            d.profileID = profile.machineID
-            d.profileIsFallback = profile.isFallback
-            d.mmPerPt = Double(mppValue) * 1000
-            d.materialFound = found
-            d.materialTotal = total
+            if d.foldY != reportedFold { d.foldY = reportedFold }
+            if d.profileID != profile.machineID { d.profileID = profile.machineID }
+            if d.cameraProfile != profile { d.cameraProfile = profile }
+            if d.mmPerPt != HologramDeviceProfile.mmPerPoint { d.mmPerPt = HologramDeviceProfile.mmPerPoint }
+            if d.materialFound != snap.materialFound { d.materialFound = snap.materialFound }
+            if d.materialTotal != snap.materialTotal { d.materialTotal = snap.materialTotal }
         }
     }
 
@@ -1017,12 +1132,15 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
         let t = g.translation(in: self)
         g.setTranslation(.zero, in: self)
         // 指を右へ動かすと、視点が右へ動く（覗き込む感覚）
-        rig.manual.x = min(max(rig.manual.x + Float(t.x) * 0.0004, -0.12), 0.12)
-        rig.manual.y = min(max(rig.manual.y - Float(t.y) * 0.0004, -0.12), 0.12)
+        rig.addManual(dx: Float(t.x) * 0.0004, dy: -Float(t.y) * 0.0004)
     }
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         rig.updateForFrame(time: time)
+        // カメラ使用開始で occlusion が後から有効になる場合に備え、約1秒に1回 main で読み直す
+        if rig.takeCameraRefreshTick(time: time) {
+            DispatchQueue.main.async { [weak self] in self?.pushLayout() }
+        }
         // 目が下パネルの裏側に回って投影が成り立たないときは、ゆがんだ絵を出さず下のビューを隠す
         let ok = rig.lowerValid
         if ok != lastLowerOK {

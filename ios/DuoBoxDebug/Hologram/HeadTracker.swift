@@ -22,10 +22,13 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     private let lock = NSLock()
     private var _head = SIMD3<Float>(0, 0, 0.30)
     private var _rawRel = SIMD3<Float>(0, 0, 0)   // 変換前の本当の生値（ARKitカメラ座標。向き変換・abs・クランプを通す前）
+    private var _rawDistance: Float = 0        // クランプ前の距離 abs(rel.z)
     private var _faceActive = false
     private var _lastFaceTime: TimeInterval?   // 最後に顔を捉えた時刻（CACurrentMediaTime）
 
     var head: SIMD3<Float> { lock.lock(); defer { lock.unlock() }; return _head }
+    /// 切り分け表示用：クランプ前の距離 abs(rel.z)（m）。クランプ後は head.z
+    var rawDistance: Float { lock.lock(); defer { lock.unlock() }; return _rawDistance }
     /// 切り分け表示用：didUpdate で計算した rel そのもの（符号もクランプもそのまま）
     var rawRel: SIMD3<Float> { lock.lock(); defer { lock.unlock() }; return _rawRel }
     var faceActive: Bool { lock.lock(); defer { lock.unlock() }; return _faceActive }
@@ -233,9 +236,11 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         default:                   (sx, sy) = (rel.y, -rel.x)   // 縦持ち
         }
         // 目はカメラの前（-z 側）にいるので、距離は -z。極端な値は丸める
-        let dist = min(max(abs(rel.z), 0.15), 0.9)
+        let rawDist = abs(rel.z)
+        let dist = min(max(rawDist, 0.15), 0.9)
         lock.lock()
         _rawRel = SIMD3<Float>(rel.x, rel.y, rel.z)
+        _rawDistance = rawDist
         _head = SIMD3<Float>(sx, sy, dist)
         _faceActive = true
         _lastFaceTime = CACurrentMediaTime()

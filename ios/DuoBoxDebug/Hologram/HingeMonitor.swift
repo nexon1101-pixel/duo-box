@@ -67,4 +67,21 @@ final class HingeMonitor: ObservableObject {
         }
         return nil
     }
+
+    /// 内側カメラ（.occlusion の reserved region）の、ビュー座標での frame。
+    ///
+    /// .division と同じ方法で、有効な領域だけを取る。カメラ使用開始で後から有効になることがあるので、
+    /// 呼び出し側が定期的に読み直す。複数あるときは画面の横中央に最も近いものを使う。
+    /// 取れない環境・有効な領域がないときは nil（呼び出し側は既定値で動く）。
+    func occlusionFrame(in view: UIView) -> CGRect? {
+        if #available(iOS 27.1, *) {
+            let midX = view.bounds.midX
+            return view.reservedRegions(kind: .occlusion)
+                .filter { $0.isActive }
+                .map { $0.frame }
+                .filter { !$0.isNull && !$0.isInfinite && !$0.isEmpty }
+                .min { abs($0.midX - midX) < abs($1.midX - midX) }
+        }
+        return nil
+    }
 }
