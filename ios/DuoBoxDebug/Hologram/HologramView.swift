@@ -4,15 +4,24 @@ import SwiftUI
 struct HologramView: View {
     var onExit: () -> Void
     @StateObject private var tracker = HeadTracker()
+    @StateObject private var hinge = HingeMonitor()
+
+    /// 状態ラベル。ヒンジ角度が取れていれば併記する（取れなければ全開 180° 扱い）
+    private var statusLine: String {
+        if let deg = hinge.angleDegrees {
+            return "\(tracker.statusText)｜ヒンジ \(Int(deg.rounded()))°"
+        }
+        return "\(tracker.statusText)｜ヒンジ角度なし（全開扱い）"
+    }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            HologramSceneView(tracker: tracker)
+            HologramSceneView(tracker: tracker, hinge: hinge)
                 .ignoresSafeArea()
 
             // 状態ラベル（顔トラッキング中か、ドラッグ操作かが分かる）
             VStack {
-                Text(tracker.statusText)
+                Text(statusLine)
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.85))
                     .padding(.horizontal, 12)
