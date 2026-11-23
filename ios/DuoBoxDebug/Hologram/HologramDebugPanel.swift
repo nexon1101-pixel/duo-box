@@ -77,6 +77,8 @@ struct HologramDebugPanel: View {
     /// クレジットカード（ISO/IEC 7810 ID-1）の長辺
     private static let cardLongSideMM: Double = 85.60
     @State private var barLength: Double = 200
+    /// 設定をコピーした時刻（「コピーしました」を少しの間出す）
+    @State private var copiedAt: Date?
 
     var body: some View {
         ScrollView {
@@ -103,6 +105,8 @@ struct HologramDebugPanel: View {
                 recordsSection
                 Divider()
                 chipSection
+                Divider()
+                copySection
             }
             .padding(14)
         }
@@ -451,6 +455,123 @@ struct HologramDebugPanel: View {
             .font(.caption2)
             .foregroundStyle(.white.opacity(0.7))
         }
+    }
+
+    // MARK: 設定のコピー
+
+    private var copySection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("⑩ 設定のコピー").font(.subheadline.bold())
+            TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Button("設定をテキストでコピー") {
+                            UIPasteboard.general.string = settingsText()
+                            copiedAt = Date()
+                        }
+                        .font(.caption)
+                        if let copiedAt, context.date.timeIntervalSince(copiedAt) < 2 {
+                            Text("コピーしました").font(.caption)
+                        }
+                    }
+                    Text(settingsText())
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    /// 数値を決まった桁の文字列にする。値が無い・有限でないときは「—」
+    private func num(_ value: Double?, _ digits: Int = 1, signed: Bool = false) -> String {
+        guard let value, value.isFinite else { return "—" }
+        return String(format: "%\(signed ? "+" : "").\(digits)f", value)
+    }
+
+    private func num(_ value: Float?, _ digits: Int = 1, signed: Bool = false) -> String {
+        let converted: Double? = value.map { Double($0) }
+        return num(converted, digits, signed: signed)
+    }
+
+    /// 現在の設定をプレーンテキストに組み立てる
+    private func settingsText() -> String {
+        let d = diagnostics
+        let snapshot = d.rig?.snapshot
+        let s = snapshot?.hasFrame == true ? snapshot : nil
+        let camera = d.cameraProfile
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+
+        var lines: [String] = []
+        lines.append("【基本】")
+        lines.append("ビルド: \(build)")
+        lines.append("機種ID: \(HologramDeviceProfile.readMachineID())")
+        lines.append("mm/pt: \(num(d.mmPerPt, 3))")
+        lines.append("パネル寸法: 幅 \(num(s?.panelMM?.x)) mm／上 \(num(s?.panelMM?.y)) mm／下 \(num(s?.panelMM?.z)) mm")
+
+        lines.append("")
+        lines.append("【カメラ】")
+        let sourceLabel: String
+        switch camera.cameraSource {
+        case .occlusion: sourceLabel = "occlusion"
+        case .fallback: sourceLabel = "既定値"
+        case .lowerPanel: sourceLabel = "既定値（カメラが下パネル側）"
+        }
+        // pt は occlusion から読めて実際に使っているときだけ出す（既定値には pt の実測がない）
+        let usedCenter = camera.cameraSource == .occlusion ? camera.cameraCenterPt : nil
+        let rightPt = usedCenter.map { Double($0.x - camera.viewWidthPt / 2) }
+        lines.append("取得元: \(sourceLabel)")
+        lines.append("上端から: \(num(usedCenter.map { Double($0.y) }, 2)) pt／\(num(camera.cameraBelowTopMM)) mm")
+        lines.append("横中央から（右が正）: \(num(rightPt, 2, signed: true)) pt／\(num(camera.cameraRightMM, 1, signed: true)) mm")
+        if camera.cameraSource == .lowerPanel, let c = camera.cameraCenterPt {
+            lines.append("読み取った中心（未使用）: x \(num(Double(c.x), 2)) y \(num(Double(c.y), 2)) pt")
+        }
+        lines.append("下パネル側の警告: \(camera.cameraSource == .lowerPanel ? "あり" : "なし")")
+        let foldY = d.foldY ?? (camera.foldYPt > 0 ? camera.foldYPt : nil)
+        let foldNote = d.foldY == nil && foldY != nil ? "（画面中央で代用）" : ""
+        lines.append("折り目 foldY: \(num(foldY.map { Double($0) }, 2)) pt\(foldNote)")
+        lines.append("折り目の離れ G: \(num(s?.foldGapMM, 2)) mm")
+
+        lines.append("")
+        lines.append("【調整値】")
+        lines.append("壁の下げ量: スライダー \(num(d.wallRecessMM)) mm／実効 \(num(s?.effectiveRecessMM)) mm")
+        lines.append("前後位置 p: \(d.pAuto ? "自動" : "手動")／実効 \(num(s?.pEff, 2))／pMax \(num(s?.pMax, 2))")
+        lines.append("向き w: \(d.wAuto ? "自動" : "手動")／実効 \(num(s?.wEff, 2))")
+        lines.append("身長: 倍率 ×\(num(d.heightScale, 2))／自動 \(num(s?.autoHeightMM)) mm")
+        lines.append("格子: \(d.showGrid ? "ON" : "OFF")")
+        lines.append("マーカー: \(d.showMarkers ? "ON" : "OFF")")
+
+        lines.append("")
+        lines.append("【1€ フィルタ】")
+        lines.append("最小カットオフ: \(num(d.oeMinCutoff, 2)) Hz")
+        lines.append("β: \(num(d.oeBeta, 2))")
+        lines.append("先読み: \(num(d.oePredMS, 0)) ms")
+        lines.append("先読み上限 predictionMaxOffset: \(num(HologramRig.predictionMaxOffset * 1000)) mm")
+
+        lines.append("")
+        lines.append("【定数】")
+        lines.append("cornerFadeStartDeg: \(num(HologramRig.cornerFadeStartDeg, 0))°")
+        lines.append("cornerFadeEndDeg: \(num(HologramRig.cornerFadeEndDeg, 0))°")
+        lines.append("foldGapMaxMM: \(num(HologramDeviceProfile.foldGapMaxMM, 2)) mm")
+        lines.append("開いてください表示: \(num(HologramView.openPromptShowBelowDeg, 0))° 未満で表示／\(num(HologramView.openPromptHideAtDeg, 0))° 以上で消す")
+
+        lines.append("")
+        lines.append("【角度ごとの p・w 記録】")
+        if d.pwRecords.isEmpty {
+            lines.append("記録なし")
+        } else {
+            for r in d.pwRecords {
+                lines.append("\(num(r.angleDeg, 0))°: p \(num(r.p, 2))／w \(num(r.w, 2))")
+            }
+        }
+
+        lines.append("")
+        lines.append("【現在の状態】")
+        lines.append("ヒンジ角度: \(num(hinge.angleDegrees))°")
+        let minMargin = s?.marginsMM.filter { !$0.isNaN }.min()
+        lines.append("見切れ余裕の最小: \(num(minMargin, 1, signed: true)) mm")
+        lines.append("台座が下パネルに収まる割合: \(num(s?.padPct, 0)) %")
+        return lines.joined(separator: "\n")
     }
 }
 

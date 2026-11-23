@@ -12,8 +12,8 @@ struct HologramView: View {
     @State private var needsOpen = false
 
     /// この角度未満で「画面を開いてください」を出し、この角度以上で消す。間は前の状態を保つ
-    private static let openPromptShowBelowDeg: Double = 60
-    private static let openPromptHideAtDeg: Double = 70
+    static let openPromptShowBelowDeg: Double = 60
+    static let openPromptHideAtDeg: Double = 70
 
     /// 状態ラベル。ヒンジ角度が取れていれば併記する（取れなければ全開 180° 扱い）
     private var statusLine: String {

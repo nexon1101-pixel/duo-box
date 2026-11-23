@@ -56,6 +56,7 @@ final class HologramRig {
     private var upperH: Float = 0.07
     private var lowerH: Float = 0.07
     private var builtFor = SIMD3<Float>(0, 0, 0)
+    private var layoutApplied = false       // 実際の寸法を取り込んだか（描画スレッドのみ）
 
     // 調整値（メインスレッドで書き、描画スレッドで読む）
     private let tuneLock = NSLock()
@@ -238,6 +239,10 @@ final class HologramRig {
         var foldGapMM: Float = 0          // 折り目の離れの合計 G（mm）
         var materialFound = 0
         var materialTotal = 0
+        /// 1フレーム以上計算済みか（false の間、上の値は初期値）
+        var hasFrame = false
+        /// 実際に使っているパネル寸法（mm）：幅・上・下。レイアウトを取り込むまでは nil
+        var panelMM: SIMD3<Float>?
     }
     private let snapLock = NSLock()
     private var _snap = Snapshot()
@@ -270,6 +275,7 @@ final class HologramRig {
     private func applyLayout() {
         guard let l = layout else { return }
         width = l.width; upperH = l.upperH; lowerH = l.lowerH; profile = l.profile
+        layoutApplied = true
         let key = SIMD3(l.width, l.upperH, l.lowerH)
         if key != builtFor {
             let d = abs(key - builtFor)
@@ -966,7 +972,9 @@ final class HologramRig {
                          marginsMM: marginsMM, pMax: pMax,
                          effectiveRecessMM: recess * 1000,
                          foldGapMM: foldHalfGap * 2 * 1000,
-                         materialFound: materialFound, materialTotal: materialTotal)
+                         materialFound: materialFound, materialTotal: materialTotal,
+                         hasFrame: true,
+                         panelMM: layoutApplied ? SIMD3(width, upperH, lowerH) * 1000 : nil)
         snapLock.unlock()
     }
 
