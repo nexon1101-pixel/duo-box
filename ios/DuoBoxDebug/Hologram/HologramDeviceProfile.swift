@@ -28,6 +28,24 @@ struct HologramDeviceProfile: Equatable {
         case occlusion    // reserved region から読めた（上パネル側）
         case fallback     // 取れないので既定値
         case lowerPanel   // カメラが下パネル側。補正せず既定値で動かし、パネルで向きの変更を促す
+        case manual       // 手で合わせた値（occlusion より優先）
+    }
+
+    /// 手で合わせたカメラ位置（mm）
+    struct ManualCamera: Equatable {
+        var belowTopMM: Double
+        var rightMM: Double
+    }
+
+    /// カメラ位置を、左右を言葉にした文で返す
+    static func cameraPositionText(belowTopMM: Double, rightMM: Double) -> String {
+        let side: String
+        if abs(rightMM) < 0.05 {
+            side = "画面の中央"
+        } else {
+            side = "画面の中央から\(rightMM < 0 ? "左" : "右")へ \(String(format: "%.1f", abs(rightMM)))mm"
+        }
+        return "上パネルの上端から下へ \(String(format: "%.1f", belowTopMM))mm、\(side)"
     }
 
     let machineID: String
@@ -37,6 +55,12 @@ struct HologramDeviceProfile: Equatable {
     var cameraRightMM: Double = HologramDeviceProfile.defaultCameraRightMM
     /// 読み取った occlusion の中心（ビュー座標 pt）。取れなければ nil
     var cameraCenterPt: CGPoint?
+    /// occlusion の生の frame（使ったもの）と、有効だった全部の frame（ビュー座標 pt）
+    var occlusionFrame: CGRect?
+    var occlusionFrames: [CGRect] = []
+    /// occlusion から計算した位置（mm）。上パネル側で読めたときだけ値が入る
+    var occlusionBelowTopMM: Double?
+    var occlusionRightMM: Double?
     /// 折り目の位置（ビュー座標 pt）
     var foldYPt: CGFloat = 0
     /// ビューの幅（pt）。横中央からの差の表示に使う
@@ -49,20 +73,31 @@ struct HologramDeviceProfile: Equatable {
     var metersPerPoint: Float { Float(Self.mmPerPoint / 1000) }
 
     /// occlusion の frame と折り目の位置から、カメラ位置を決めたプロファイルを返す
-    func resolved(occlusion: CGRect?, foldY: CGFloat, viewSize: CGSize) -> HologramDeviceProfile {
+    /// 手で合わせた値（manual）があれば、それを occlusion より優先する
+    func resolved(occlusion: CGRect?, allOcclusions: [CGRect] = [], foldY: CGFloat, viewSize: CGSize,
+                  manual: ManualCamera? = nil) -> HologramDeviceProfile {
         var p = HologramDeviceProfile(machineID: machineID)
         p.foldYPt = foldY
         p.viewWidthPt = viewSize.width
-        guard let occlusion else { return p }
-        let center = CGPoint(x: occlusion.midX, y: occlusion.midY)
-        guard center.x.isFinite, center.y.isFinite else { return p }
-        p.cameraCenterPt = center
-        if center.y > foldY {
-            p.cameraSource = .lowerPanel      // 補正しない（位置は既定値のまま）
-        } else {
-            p.cameraSource = .occlusion
-            p.cameraBelowTopMM = Double(center.y) * Self.mmPerPoint
-            p.cameraRightMM = Double(center.x - viewSize.width / 2) * Self.mmPerPoint
+        p.occlusionFrame = occlusion
+        p.occlusionFrames = allOcclusions
+        if let occlusion, occlusion.midX.isFinite, occlusion.midY.isFinite {
+            let center = CGPoint(x: occlusion.midX, y: occlusion.midY)
+            p.cameraCenterPt = center
+            if center.y > foldY {
+                p.cameraSource = .lowerPanel      // 補正しない（位置は既定値のまま）
+            } else {
+                p.cameraSource = .occlusion
+                p.cameraBelowTopMM = Double(center.y) * Self.mmPerPoint
+                p.cameraRightMM = Double(center.x - viewSize.width / 2) * Self.mmPerPoint
+                p.occlusionBelowTopMM = p.cameraBelowTopMM
+                p.occlusionRightMM = p.cameraRightMM
+            }
+        }
+        if let manual {
+            p.cameraSource = .manual
+            p.cameraBelowTopMM = manual.belowTopMM
+            p.cameraRightMM = manual.rightMM
         }
         return p
     }

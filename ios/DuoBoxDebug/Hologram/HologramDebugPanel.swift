@@ -110,6 +110,21 @@ final class HologramDiagnostics: ObservableObject {
     @Published var foldY: CGFloat?
     @Published var materialFound = 0
     @Published var materialTotal = 0
+    /// カメラ位置を変えたときに、描画側へすぐ反映するための入り口（コンテナが設定する）
+    var requestLayoutPush: (() -> Void)?
+
+    /// 手で合わせたカメラ位置を機種IDごとに保存し、すぐ反映する
+    func saveManualCamera(belowTopMM: Double, rightMM: Double) {
+        HologramCalibrationStore.saveManualCamera(.init(belowTopMM: belowTopMM, rightMM: rightMM),
+                                                  machineID: HologramDeviceProfile.readMachineID())
+        requestLayoutPush?()
+    }
+
+    /// 手で合わせた値を消して、occlusion の値へ戻す
+    func clearManualCamera() {
+        HologramCalibrationStore.clearManualCamera(machineID: HologramDeviceProfile.readMachineID())
+        requestLayoutPush?()
+    }
 }
 
 /// 三本指タップで開閉するデバッグパネル。実寸計測・端末情報・シェーダ書式チップ。
@@ -117,6 +132,7 @@ struct HologramDebugPanel: View {
     @ObservedObject var hinge: HingeMonitor
     @ObservedObject var tracker: HeadTracker
     @ObservedObject var diagnostics: HologramDiagnostics
+    var onCalibrate: () -> Void
     var onClose: () -> Void
 
     /// クレジットカード（ISO/IEC 7810 ID-1）の長辺
@@ -132,6 +148,8 @@ struct HologramDebugPanel: View {
                     Spacer()
                     Button("閉じる", action: onClose)
                 }
+                Button("キャリブレーション", action: onCalibrate)
+                    .buttonStyle(.borderedProminent)
                 rulerSection
                 Divider()
                 deviceSection
@@ -220,20 +238,33 @@ struct HologramDebugPanel: View {
         let mm = HologramDeviceProfile.mmPerPoint
         switch p.cameraSource {
         case .occlusion:
-            row("カメラ位置", "occlusion から取得")
+            row("カメラ位置の出どころ", "occlusion")
+        case .manual:
+            row("カメラ位置の出どころ", "手で合わせた値")
         case .fallback:
-            row("カメラ位置", "カメラ位置：既定値（上端から \(String(format: "%.1f", p.cameraBelowTopMM)) mm、横中央）")
+            row("カメラ位置の出どころ", "既定値")
         case .lowerPanel:
+            row("カメラ位置の出どころ", "既定値")
             Text("カメラが下側：向きを変えてください").foregroundStyle(.red)
         }
+        row("使用中のカメラ位置", HologramDeviceProfile.cameraPositionText(belowTopMM: p.cameraBelowTopMM, rightMM: p.cameraRightMM))
+        if let below = p.occlusionBelowTopMM, let right = p.occlusionRightMM {
+            row("occlusion の位置", HologramDeviceProfile.cameraPositionText(belowTopMM: below, rightMM: right))
+        }
+        row("occlusion 生 frame（使用）", p.occlusionFrame.map(frameText) ?? "なし")
+        row("occlusion 有効な数", "\(p.occlusionFrames.count)")
+        ForEach(Array(p.occlusionFrames.enumerated()), id: \.offset) { i, f in
+            row("　frame \(i + 1)", frameText(f))
+        }
         if let c = p.cameraCenterPt {
-            row("カメラ中心", "x \(fmt(c.x)) y \(fmt(c.y)) pt")
-            row("上端から", "\(fmt(c.y)) pt ／ \(String(format: "%.1f", Double(c.y) * mm)) mm")
+            row("occlusion 中心", "x \(fmt(c.x)) y \(fmt(c.y)) pt")
             let above = p.foldYPt - c.y
             row("折り目から（上が正）", "\(fmt(above)) pt ／ \(String(format: "%.1f", Double(above) * mm)) mm")
-            let right = c.x - p.viewWidthPt / 2
-            row("横中央から（右が正）", "\(fmt(right)) pt ／ \(String(format: "%.1f", Double(right) * mm)) mm")
         }
+    }
+
+    private func frameText(_ f: CGRect) -> String {
+        "x \(fmt(f.minX)) y \(fmt(f.minY)) w \(fmt(f.width)) h \(fmt(f.height))"
     }
 
     private func row(_ name: String, _ value: String) -> some View {
@@ -563,6 +594,7 @@ struct HologramDebugPanel: View {
         let sourceLabel: String
         switch camera.cameraSource {
         case .occlusion: sourceLabel = "occlusion"
+        case .manual: sourceLabel = "手で合わせた値"
         case .fallback: sourceLabel = "既定値"
         case .lowerPanel: sourceLabel = "既定値（カメラが下パネル側）"
         }
@@ -570,8 +602,10 @@ struct HologramDebugPanel: View {
         let usedCenter = camera.cameraSource == .occlusion ? camera.cameraCenterPt : nil
         let rightPt = usedCenter.map { Double($0.x - camera.viewWidthPt / 2) }
         lines.append("取得元: \(sourceLabel)")
+        lines.append("位置: \(HologramDeviceProfile.cameraPositionText(belowTopMM: camera.cameraBelowTopMM, rightMM: camera.cameraRightMM))")
         lines.append("上端から: \(num(usedCenter.map { Double($0.y) }, 2)) pt／\(num(camera.cameraBelowTopMM)) mm")
         lines.append("横中央から（右が正）: \(num(rightPt, 2, signed: true)) pt／\(num(camera.cameraRightMM, 1, signed: true)) mm")
+        lines.append("occlusion 生 frame（有効 \(camera.occlusionFrames.count) 個）: \(camera.occlusionFrames.isEmpty ? "なし" : camera.occlusionFrames.map(frameText).joined(separator: " ／ "))")
         if camera.cameraSource == .lowerPanel, let c = camera.cameraCenterPt {
             lines.append("読み取った中心（未使用）: x \(num(Double(c.x), 2)) y \(num(Double(c.y), 2)) pt")
         }

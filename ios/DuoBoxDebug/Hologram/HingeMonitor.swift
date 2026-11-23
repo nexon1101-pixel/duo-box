@@ -74,14 +74,18 @@ final class HingeMonitor: ObservableObject {
     /// 呼び出し側が定期的に読み直す。複数あるときは画面の横中央に最も近いものを使う。
     /// 取れない環境・有効な領域がないときは nil（呼び出し側は既定値で動く）。
     func occlusionFrame(in view: UIView) -> CGRect? {
+        let midX = view.bounds.midX
+        return occlusionFrames(in: view).min { abs($0.midX - midX) < abs($1.midX - midX) }
+    }
+
+    /// 有効な .occlusion の frame を全部返す（診断用。左右の取り違えの調査に使う）
+    func occlusionFrames(in view: UIView) -> [CGRect] {
         if #available(iOS 27.1, *) {
-            let midX = view.bounds.midX
             return view.reservedRegions(kind: .occlusion)
                 .filter { $0.isActive }
                 .map { $0.frame }
                 .filter { !$0.isNull && !$0.isInfinite && !$0.isEmpty }
-                .min { abs($0.midX - midX) < abs($1.midX - midX) }
         }
-        return nil
+        return []
     }
 }

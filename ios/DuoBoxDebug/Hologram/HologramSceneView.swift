@@ -1050,6 +1050,7 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
         didSet {
             guard let diagnostics else { return }
             diagnostics.rig = rig
+            diagnostics.requestLayoutPush = { [weak self] in self?.pushLayout() }
             // 計測パネルの調整値を描画側へ流す
             cancellables.removeAll()
             diagnostics.$wallRecessMM.sink { [weak self] v in self?.rig.setWallRecess(Float(v) / 1000) }
@@ -1150,7 +1151,10 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
         guard bounds.width > 0, bounds.height > 0, layoutFold > 0 else { return }
         let fold = layoutFold
         let profile = HologramDeviceProfile.current()
-            .resolved(occlusion: hinge?.occlusionFrame(in: self), foldY: fold, viewSize: bounds.size)
+            .resolved(occlusion: hinge?.occlusionFrame(in: self),
+                      allOcclusions: hinge?.occlusionFrames(in: self) ?? [],
+                      foldY: fold, viewSize: bounds.size,
+                      manual: HologramCalibrationStore.manualCamera(machineID: HologramDeviceProfile.readMachineID()))
         let mpp = profile.metersPerPoint
         rig.setLayout(.init(width: Float(bounds.width) * mpp,
                             upperH: Float(fold) * mpp,

@@ -10,6 +10,8 @@ struct HologramView: View {
     @State private var showDebugPanel = false
     /// 「画面を開いてください」の表示中か（ヒステリシスのため状態で持つ）
     @State private var needsOpen = false
+    /// キャリブレーション画面の表示
+    @State private var showCalibration = false
 
     /// この角度未満で「画面を開いてください」を出し、この角度以上で消す。間は前の状態を保つ
     static let openPromptShowBelowDeg: Double = 60
@@ -75,6 +77,7 @@ struct HologramView: View {
             // 計測パネル（三本指タップで開閉）
             if showDebugPanel {
                 HologramDebugPanel(hinge: hinge, tracker: tracker, diagnostics: diagnostics,
+                                   onCalibrate: { showDebugPanel = false; showCalibration = true },
                                    onClose: { showDebugPanel = false })
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
@@ -92,6 +95,12 @@ struct HologramView: View {
             .accessibilityLabel("ホームへ戻る")
             .padding(.trailing, 20)
             .padding(.bottom, 20)
+
+            if showCalibration {
+                HologramCameraAlignView(diagnostics: diagnostics,
+                                        onDecide: { showCalibration = false },
+                                        onCancel: { showCalibration = false })
+            }
         }
         .onAppear { tracker.start() }
         .onDisappear { tracker.stop() }

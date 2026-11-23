@@ -28,4 +28,26 @@ enum HologramCalibrationStore {
             $0["axis"] = [Double(m.xAxis), Double(m.xSign), Double(m.yAxis), Double(m.ySign)]
         }
     }
+
+    /// 手で合わせたカメラ位置（mm）。occlusion より優先する。無い・壊れているときは nil
+    static func manualCamera(machineID: String) -> HologramDeviceProfile.ManualCamera? {
+        let d = dictionary(machineID)
+        guard let below = d["cameraBelowTopMM"] as? Double, let right = d["cameraRightMM"] as? Double,
+              below.isFinite, right.isFinite else { return nil }
+        return .init(belowTopMM: below, rightMM: right)
+    }
+
+    static func saveManualCamera(_ c: HologramDeviceProfile.ManualCamera, machineID: String) {
+        update(machineID) {
+            $0["cameraBelowTopMM"] = c.belowTopMM
+            $0["cameraRightMM"] = c.rightMM
+        }
+    }
+
+    static func clearManualCamera(machineID: String) {
+        update(machineID) {
+            $0.removeValue(forKey: "cameraBelowTopMM")
+            $0.removeValue(forKey: "cameraRightMM")
+        }
+    }
 }
