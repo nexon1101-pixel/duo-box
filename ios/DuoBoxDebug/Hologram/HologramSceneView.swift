@@ -1161,7 +1161,25 @@ final class HologramRig {
         let pBase = pAuto ? (pwNow?.p ?? Self.defaultPPos) : pPos
         let pEff = min(max(pBase, 0), pMax)
         let distFold = (1 - pEff) * lowerH    // 下パネルの折り目側の端から手前方向への距離（負＝端より奥）
-        standNode.simdPosition = SIMD3(0, 0, lowerEdge + distFold - frameZ0)
+        // 床はガラスより floorDrop だけ奥にあるので、ガラス上の位置のまま床に置くと、斜め上から見たときに
+        // 手前へずれて見える（実機で、人形が下の画面の手前に寄り、台座が端に近づいて小さくなった）。
+        // そこで p は「基準の目の位置から見て、下の画面のどこに足が見えるか」とし、その見え方になる床の上の点に立たせる。
+        // 頭を動かしても立ち位置が動かないよう、いまの目ではなく基準の目で決める
+        let glassS = lowerEdge + distFold                           // ガラス上で足が見えてほしい位置（軸からの距離）
+        var standS = glassS
+        if floorDrop > 0 {
+            let e = nominalEye
+            let en = simd_dot(e, lower.normal)                      // 基準の目のガラスからの高さ
+            let target = lower.d * glassS
+            if en > 0.01 {
+                // 目 → ガラス上の点 の直線を、床の面（ガラスから floorDrop 奥）まで延ばす
+                let u = (floorDrop + en) / en
+                let onFloor = e + (target - e) * u
+                standS = simd_dot(onFloor, lower.d)
+            }
+        }
+        standS = max(standS, sC + 0.002)                            // 部屋の角より奥には立たせない
+        standNode.simdPosition = SIMD3(0, 0, standS - frameZ0)
         // 部屋の手がかり：巾木・床のライン・壁の枠
         baseboardNode.simdPosition = SIMD3(0, yC + 0.002, -recess + 0.0004)
         for l in floorLines {
