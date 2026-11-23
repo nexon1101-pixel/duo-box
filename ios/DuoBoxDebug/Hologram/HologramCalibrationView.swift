@@ -1,3 +1,4 @@
+import simd
 import SwiftUI
 
 /// 上下左右へ 0.5mm ずつ動かすボタン。move は (右へ mm, 下へ mm)
