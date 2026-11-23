@@ -68,24 +68,51 @@ final class HingeMonitor: ObservableObject {
         return nil
     }
 
-    /// 内側カメラ（.occlusion の reserved region）の、ビュー座標での frame。
-    ///
-    /// .division と同じ方法で、有効な領域だけを取る。カメラ使用開始で後から有効になることがあるので、
-    /// 呼び出し側が定期的に読み直す。複数あるときは画面の横中央に最も近いものを使う。
-    /// 取れない環境・有効な領域がないときは nil（呼び出し側は既定値で動く）。
-    func occlusionFrame(in view: UIView) -> CGRect? {
-        let midX = view.bounds.midX
-        return occlusionFrames(in: view).min { abs($0.midX - midX) < abs($1.midX - midX) }
+    /// occlusion の1領域の、変換前と変換後の frame。
+    struct OcclusionReading: Equatable {
+        var raw: CGRect          // reservedRegions が返した値
+        var converted: CGRect    // ビュー座標へ直した値
+        var method: String       // どの根拠で直したか（パネル②に出す）
     }
 
-    /// 有効な .occlusion の frame を全部返す（診断用。左右の取り違えの調査に使う）
-    func occlusionFrames(in view: UIView) -> [CGRect] {
+    /// 有効な .occlusion を、変換前後の組で返す。
+    /// カメラ使用開始で後から有効になることがあるので、呼び出し側が定期的に読み直す。
+    func occlusionReadings(in view: UIView) -> [OcclusionReading] {
         if #available(iOS 27.1, *) {
+            let divisions = view.reservedRegions(kind: .division).filter { $0.isActive }.map { $0.frame }
             return view.reservedRegions(kind: .occlusion)
                 .filter { $0.isActive }
                 .map { $0.frame }
                 .filter { !$0.isNull && !$0.isInfinite && !$0.isEmpty }
+                .map { Self.reading(raw: $0, divisions: divisions, in: view) }
         }
         return []
+    }
+
+    /// 複数あるときは、変換後の中心が画面の横中央に最も近いものを使う
+    static func primary(_ readings: [OcclusionReading], in view: UIView) -> OcclusionReading? {
+        let midX = view.bounds.midX
+        return readings.min { abs($0.converted.midX - midX) < abs($1.converted.midX - midX) }
+    }
+
+    /// frame の座標系は公式文書で確認できていないため、実機で確かめられる根拠の順に判定する。
+    /// 1. 画面の固定座標系とビューの縦横が入れ替わっていれば、UIKit の変換に任せる
+    /// 2. 折り目の帯が、横に走るはずなのに縦長で返っていれば、frame が 90° 回っているとみなす
+    /// 3. どちらでもなければ変換しない（「変換なし」と表示する）
+    private static func reading(raw: CGRect, divisions: [CGRect], in view: UIView) -> OcclusionReading {
+        let b = view.bounds
+        if let screen = view.window?.windowScene?.screen {
+            let fixed = screen.fixedCoordinateSpace
+            let isSwapped = (fixed.bounds.width > fixed.bounds.height) != (b.width > b.height)
+            if isSwapped {
+                return .init(raw: raw, converted: view.convert(raw, from: fixed), method: "固定座標系から変換")
+            }
+        }
+        if let fold = divisions.first, fold.height > fold.width {
+            // 実機の報告（上端から 41pt → 実際は左端から 41pt）に合う向きの 90° 回転
+            let turned = CGRect(x: raw.minY, y: b.height - raw.maxX, width: raw.height, height: raw.width)
+            return .init(raw: raw, converted: turned, method: "折り目の向きから 90° 回転")
+        }
+        return .init(raw: raw, converted: raw, method: "変換なし")
     }
 }

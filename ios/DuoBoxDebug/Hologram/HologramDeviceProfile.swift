@@ -58,6 +58,10 @@ struct HologramDeviceProfile: Equatable {
     /// occlusion の生の frame（使ったもの）と、有効だった全部の frame（ビュー座標 pt）
     var occlusionFrame: CGRect?
     var occlusionFrames: [CGRect] = []
+    /// 変換前の frame（occlusionFrames と同じ順）と、変換の根拠
+    var occlusionRawFrame: CGRect?
+    var occlusionRawFrames: [CGRect] = []
+    var occlusionMethod: String?
     /// occlusion から計算した位置（mm）。上パネル側で読めたときだけ値が入る
     var occlusionBelowTopMM: Double?
     var occlusionRightMM: Double?
@@ -74,13 +78,18 @@ struct HologramDeviceProfile: Equatable {
 
     /// occlusion の frame と折り目の位置から、カメラ位置を決めたプロファイルを返す
     /// 手で合わせた値（manual）があれば、それを occlusion より優先する
-    func resolved(occlusion: CGRect?, allOcclusions: [CGRect] = [], foldY: CGFloat, viewSize: CGSize,
+    func resolved(primary: HingeMonitor.OcclusionReading?, readings: [HingeMonitor.OcclusionReading] = [],
+                  foldY: CGFloat, viewSize: CGSize,
                   manual: ManualCamera? = nil) -> HologramDeviceProfile {
         var p = HologramDeviceProfile(machineID: machineID)
+        let occlusion = primary?.converted
         p.foldYPt = foldY
         p.viewWidthPt = viewSize.width
         p.occlusionFrame = occlusion
-        p.occlusionFrames = allOcclusions
+        p.occlusionFrames = readings.map(\.converted)
+        p.occlusionRawFrame = primary?.raw
+        p.occlusionRawFrames = readings.map(\.raw)
+        p.occlusionMethod = primary?.method
         if let occlusion, occlusion.midX.isFinite, occlusion.midY.isFinite {
             let center = CGPoint(x: occlusion.midX, y: occlusion.midY)
             p.cameraCenterPt = center

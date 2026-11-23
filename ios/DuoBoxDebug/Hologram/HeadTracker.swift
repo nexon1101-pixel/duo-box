@@ -121,40 +121,105 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     private var calibrationCamera: ARCamera?
     private var calibrationOrientation = UIInterfaceOrientation.portrait
     private var calibrationMirror = false
+    private var calibrationImageSize = CGSize.zero
+    private var calibrationDisplay = CGAffineTransform.identity
+    /// 映像を 180° 回して表示するか（顔の上方向から判定して保持する）
+    private var calibrationRotated = false
+    private var calibrationRotateVotes = 0
     private var calibrationBusy = false
     private var calibrationLastImage: TimeInterval = 0
     private let calibrationQueue = DispatchQueue(label: "hologram.calibration.video", qos: .userInitiated)
     private lazy var calibrationContext = CIContext(options: [.cacheIntermediates: false])
 
+    /// 切り分け表示用：映像を 180° 補正しているか
+    var calibrationVideoRotated: Bool { lock.lock(); defer { lock.unlock() }; return calibrationRotated }
+
     func setCalibrationFeed(_ feed: CalibrationFeed?, viewport: CGSize) {
-        lock.lock(); calibrationFeed = feed; calibrationViewport = viewport; lock.unlock()
+        lock.lock()
+        calibrationFeed = feed
+        calibrationViewport = viewport
+        if feed == nil { calibrationRotated = false; calibrationRotateVotes = 0 }
+        lock.unlock()
     }
 
-    /// 画面座標（x 右、y 上、z は距離）の点を、映像の上の位置（鏡写し込み）へ直す
+    /// 正規化画像（左上原点）→ 表示するビューの pt（左上原点）。回転の補正と鏡写しまで含む
+    private static func imageToView(_ display: CGAffineTransform, viewport vp: CGSize,
+                                    rotated: Bool, mirror: Bool) -> CGAffineTransform {
+        var m = display.concatenating(CGAffineTransform(scaleX: vp.width, y: vp.height))
+        if rotated { m = m.concatenating(CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: vp.width, ty: vp.height)) }
+        if mirror { m = m.concatenating(CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: vp.width, ty: 0)) }
+        return m
+    }
+
+    /// ワールド座標の点を、撮影画像の正規化座標（左上原点）へ直す。capturedImage の向きは landscapeRight
+    private static func normalizedImagePoint(_ world: SIMD3<Float>, camera: ARCamera, imageSize: CGSize) -> CGPoint? {
+        guard imageSize.width > 0, imageSize.height > 0 else { return nil }
+        let p = camera.projectPoint(world, orientation: .landscapeRight, viewportSize: imageSize)
+        guard p.x.isFinite, p.y.isFinite else { return nil }
+        return CGPoint(x: p.x / imageSize.width, y: p.y / imageSize.height)
+    }
+
+    /// 画面座標（x 右、y 上、z は距離）の点を、表示中の映像の上の位置へ直す。映像と同じ変換を通す
     func projectForCalibration(_ s: SIMD3<Float>, flip: Bool) -> CGPoint? {
         lock.lock()
-        let storedCamera = calibrationCamera, o = calibrationOrientation, vp = calibrationViewport, mirror = calibrationMirror
+        let storedCamera = calibrationCamera, o = calibrationOrientation, vp = calibrationViewport
+        let mirror = calibrationMirror, rotated = calibrationRotated
+        let display = calibrationDisplay, imageSize = calibrationImageSize
         lock.unlock()
         guard let camera = storedCamera, vp.width > 0, vp.height > 0, s.z > 0 else { return nil }
         let world = simd_mul(simd_inverse(camera.viewMatrix(for: o)), SIMD4<Float>(s.x, s.y, -s.z, 1))
-        let p = camera.projectPoint(SIMD3<Float>(world.x, world.y, world.z), orientation: o, viewportSize: vp)
+        guard let n = Self.normalizedImagePoint(SIMD3<Float>(world.x, world.y, world.z), camera: camera, imageSize: imageSize) else { return nil }
+        let p = n.applying(Self.imageToView(display, viewport: vp, rotated: rotated, mirror: mirror != flip))
         guard p.x.isFinite, p.y.isFinite else { return nil }
-        return CGPoint(x: mirror != flip ? vp.width - p.x : p.x, y: p.y)
+        return p
+    }
+
+    /// 顔の上方向が映像の上を向くように、180° 補正の要否を決める。向きが続けて同じときだけ切り替える
+    private func updateCalibrationRotation(frame: ARFrame, face: ARFaceAnchor, display: CGAffineTransform, viewport vp: CGSize) {
+        let c = face.transform.columns.3, up = face.transform.columns.1
+        let base = SIMD3<Float>(c.x, c.y, c.z)
+        let top = base + SIMD3<Float>(up.x, up.y, up.z) * 0.08
+        let size = frame.camera.imageResolution
+        guard let a = Self.normalizedImagePoint(base, camera: frame.camera, imageSize: size),
+              let b = Self.normalizedImagePoint(top, camera: frame.camera, imageSize: size) else { return }
+        let m = Self.imageToView(display, viewport: vp, rotated: false, mirror: false)
+        let pa = a.applying(m), pb = b.applying(m)
+        let dx = pb.x - pa.x, dy = pb.y - pa.y
+        // 顔が大きく傾いているときは判定しない
+        guard abs(dy) > abs(dx) * 1.5 else { return }
+        let needsRotation = dy > 0
+        lock.lock()
+        if needsRotation == calibrationRotated {
+            calibrationRotateVotes = 0
+        } else {
+            calibrationRotateVotes += 1
+            if calibrationRotateVotes >= 5 {
+                calibrationRotated = needsRotation
+                calibrationRotateVotes = 0
+            }
+        }
+        lock.unlock()
     }
 
     /// 映像を約15fpsで表示用の画像にする。ARFrame は持ち続けない（ARKit のバッファ枯渇を防ぐ）
-    private func feedCalibrationVideo(_ frame: ARFrame) {
+    private func feedCalibrationVideo(_ frame: ARFrame, face: ARFaceAnchor?) {
         let now = CACurrentMediaTime()
         let o = Self.interfaceOrientation()
         lock.lock()
         let vp = calibrationViewport
         guard let feed = calibrationFeed, vp.width > 0, vp.height > 0 else { lock.unlock(); return }
+        lock.unlock()
         let t = frame.displayTransform(for: o, viewportSize: vp)
+        if let face, face.isTracked { updateCalibrationRotation(frame: frame, face: face, display: t, viewport: vp) }
         // 行列式が正なら映像は鏡写しになっていないので、自撮りと同じ向きへ左右反転する
         let mirror = t.a * t.d - t.b * t.c > 0
+        lock.lock()
         calibrationCamera = frame.camera
         calibrationOrientation = o
         calibrationMirror = mirror
+        calibrationDisplay = t
+        calibrationImageSize = frame.camera.imageResolution
+        let rotated = calibrationRotated
         guard !calibrationBusy, now - calibrationLastImage >= 1.0 / 15 else { lock.unlock(); return }
         calibrationBusy = true
         calibrationLastImage = now
@@ -163,11 +228,12 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         calibrationQueue.async { [weak self] in
             guard let self else { return }
             let w = CGFloat(CVPixelBufferGetWidth(buffer)), h = CGFloat(CVPixelBufferGetHeight(buffer))
-            // CI の画素（左下原点）→ 正規化画像（左上原点）→ 正規化ビュー → ビューの pt（左下原点）
+            // CI の画素（左下原点）→ 正規化画像（左上原点）→ ビューの pt（左上原点）→ CI の出力（左下原点）
             let toNormalized = CGAffineTransform(a: 1 / w, b: 0, c: 0, d: -1 / h, tx: 0, ty: 1)
-            let toView = CGAffineTransform(a: vp.width, b: 0, c: 0, d: -vp.height, tx: 0, ty: vp.height)
-            var m = toNormalized.concatenating(t).concatenating(toView)
-            if mirror { m = m.concatenating(CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: vp.width, ty: 0)) }
+            let toOutput = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: vp.height)
+            let m = toNormalized
+                .concatenating(Self.imageToView(t, viewport: vp, rotated: rotated, mirror: mirror))
+                .concatenating(toOutput)
             let rect = CGRect(origin: .zero, size: vp)
             let image = CIImage(cvPixelBuffer: buffer).transformed(by: m).cropped(to: rect)
             let cg = self.calibrationContext.createCGImage(image, from: rect)
@@ -289,7 +355,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
             $0.lastFaceTracked = faces.first?.isTracked
             $0.cameraState = camState
         }
-        feedCalibrationVideo(frame)
+        feedCalibrationVideo(frame, face: faces.first)
         guard let face = faces.first, face.isTracked else {
             setFace(active: false)
             publishCalibrationSample(nil)
@@ -323,8 +389,12 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         _lastFaceTime = CACurrentMediaTime()
         lock.unlock()
         // キャリブレーションには 1€ を通す前・カメラ位置を足す前の生の値を渡す
+        let view = frame.camera.viewMatrix(for: Self.interfaceOrientation())
+        let leftScreen = simd_mul(view, leftEye), rightScreen = simd_mul(view, rightEye)
         publishCalibrationSample(.init(screen: SIMD3<Float>(screen.x, screen.y, rawDist),
                                        camera: SIMD3<Float>(rel.x, rel.y, rel.z),
+                                       leftEye: SIMD3<Float>(leftScreen.x, leftScreen.y, -leftScreen.z),
+                                       rightEye: SIMD3<Float>(rightScreen.x, rightScreen.y, -rightScreen.z),
                                        time: CACurrentMediaTime()))
         publish(.tracking)
     }
@@ -375,6 +445,8 @@ final class CalibrationFeed: ObservableObject {
     struct Sample: Equatable {
         var screen: SIMD3<Float>   // 画面座標（x 右、y 上、z は距離）。1€ の前、カメラ位置を足す前
         var camera: SIMD3<Float>   // ARKit のカメラ座標
+        var leftEye: SIMD3<Float>  // 左目（画面座標、z は距離）
+        var rightEye: SIMD3<Float> // 右目（画面座標、z は距離）
         var time: TimeInterval
     }
     @Published var image: CGImage?

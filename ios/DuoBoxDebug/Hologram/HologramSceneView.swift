@@ -1232,9 +1232,10 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
     private func pushLayout() {
         guard bounds.width > 0, bounds.height > 0, layoutFold > 0 else { return }
         let fold = layoutFold
+        let readings = hinge?.occlusionReadings(in: self) ?? []
         let profile = HologramDeviceProfile.current()
-            .resolved(occlusion: hinge?.occlusionFrame(in: self),
-                      allOcclusions: hinge?.occlusionFrames(in: self) ?? [],
+            .resolved(primary: HingeMonitor.primary(readings, in: self),
+                      readings: readings,
                       foldY: fold, viewSize: bounds.size,
                       manual: HologramCalibrationStore.manualCamera(machineID: HologramDeviceProfile.readMachineID()))
         let mpp = profile.metersPerPoint

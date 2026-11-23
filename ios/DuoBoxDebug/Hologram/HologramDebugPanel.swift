@@ -288,10 +288,13 @@ struct HologramDebugPanel: View {
         }
         row("軸対応の結果", diagnostics.calibrationResult ?? "キャリブレーション未実施")
         row("箱の確認", diagnostics.boxCheck.map { $0 ? "はい（奥に止まって見える）" : "いいえ（G2・G3 をやり直す）" } ?? "未回答")
-        row("occlusion 生 frame（使用）", p.occlusionFrame.map(frameText) ?? "なし")
+        row("occlusion 変換前 frame（使用）", p.occlusionRawFrame.map(frameText) ?? "なし")
+        row("occlusion 変換後 frame（使用）", p.occlusionFrame.map(frameText) ?? "なし")
+        row("occlusion 変換の根拠", p.occlusionMethod ?? "—")
         row("occlusion 有効な数", "\(p.occlusionFrames.count)")
         ForEach(Array(p.occlusionFrames.enumerated()), id: \.offset) { i, f in
-            row("　frame \(i + 1)", frameText(f))
+            row("　frame \(i + 1) 変換前", i < p.occlusionRawFrames.count ? frameText(p.occlusionRawFrames[i]) : "—")
+            row("　frame \(i + 1) 変換後", frameText(f))
         }
         if let c = p.cameraCenterPt {
             row("occlusion 中心", "x \(fmt(c.x)) y \(fmt(c.y)) pt")
@@ -687,7 +690,9 @@ struct HologramDebugPanel: View {
         lines.append("位置: \(HologramDeviceProfile.cameraPositionText(belowTopMM: camera.cameraBelowTopMM, rightMM: camera.cameraRightMM))")
         lines.append("上端から: \(num(usedCenter.map { Double($0.y) }, 2)) pt／\(num(camera.cameraBelowTopMM)) mm")
         lines.append("横中央から（右が正）: \(num(rightPt, 2, signed: true)) pt／\(num(camera.cameraRightMM, 1, signed: true)) mm")
-        lines.append("occlusion 生 frame（有効 \(camera.occlusionFrames.count) 個）: \(camera.occlusionFrames.isEmpty ? "なし" : camera.occlusionFrames.map(frameText).joined(separator: " ／ "))")
+        lines.append("occlusion 変換前 frame（有効 \(camera.occlusionRawFrames.count) 個）: \(camera.occlusionRawFrames.isEmpty ? "なし" : camera.occlusionRawFrames.map(frameText).joined(separator: " ／ "))")
+        lines.append("occlusion 変換後 frame: \(camera.occlusionFrames.isEmpty ? "なし" : camera.occlusionFrames.map(frameText).joined(separator: " ／ "))")
+        lines.append("occlusion 変換の根拠: \(camera.occlusionMethod ?? "—")")
         if camera.cameraSource == .lowerPanel, let c = camera.cameraCenterPt {
             lines.append("読み取った中心（未使用）: x \(num(Double(c.x), 2)) y \(num(Double(c.y), 2)) pt")
         }

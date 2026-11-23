@@ -1,5 +1,6 @@
 import simd
 import SwiftUI
+import UIKit
 
 /// 上下左右へ 0.5mm ずつ動かすボタン。move は (右へ mm, 下へ mm)
 struct CalibrationNudgePad: View {
@@ -222,26 +223,42 @@ struct HologramBoxCheckView: View {
 
 /// G3 の進行と判定。座標はすべて「カメラから見た目の位置」で扱う。
 final class AxisCalibrationModel: ObservableObject {
-    enum Stage: Int { case front, right, up, near, verify }
+    enum Stage: Int { case front, right, backFromRight, up, backFromUp, near, verify }
+    enum FrameState { case noFace, off, matched }
+
+    /// 映像の上に出す顔の枠と目印（ビューの pt）
+    struct FaceGuide: Equatable {
+        var center: CGPoint
+        var size: CGSize
+        var leftEye: CGPoint
+        var rightEye: CGPoint
+        var angle: Double      // ラジアン
+    }
 
     static let frontDistance: Float = 0.35       // 正面の目標の距離（m）
     static let frontRange: ClosedRange<Float> = 0.30...0.40
     static let stepDistance: Float = 0.10        // 右・上・近づくの目標の移動量（m）
-    static let recordMove: Float = 0.08          // 輪に入らなくても記録する移動量（m）
+    static let recordMove: Float = 0.08          // 目印に合わなくても記録する移動量（m）
     static let minimumMove: Float = 0.04         // これ未満はやり直し（m）
     static let stillRadius: Float = 0.012        // 止まっているとみなす揺れ（m）
-    static let returnRadius: Float = 0.03        // 次の段を始める前に正面へ戻ったとみなす距離（m）
+    static let returnRadius: Float = 0.03        // 正面へ戻ったとみなす距離（m）
+    static let matchRadius: Float = 0.015        // 目の中点の許容（m）
+    static let matchDistance: Float = 0.03       // 距離の許容（m）
+    static let tiltLimitDegrees = 15.0           // これ以上の傾きは「まっすぐに」と案内する
+    static let eyeSpacing: Float = 0.063         // 両目の間隔（m）
+    static let faceWidth: CGFloat = 0.15         // 枠の幅（m）
+    static let faceHeight: CGFloat = 0.21        // 枠の高さ（m）
+    static let faceCenterBelowEyes: CGFloat = 0.03 // 目の線から枠の中心までの距離（m）
     static let frontHold: TimeInterval = 2
     static let stepHold: TimeInterval = 1
-    static let ringRadius: CGFloat = 34
 
     @Published private(set) var stage = Stage.front
     @Published private(set) var message = ""
-    @Published private(set) var remaining = ""
-    @Published private(set) var eyePoint: CGPoint?
-    @Published private(set) var ringPoint: CGPoint?
-    @Published private(set) var ringScale: CGFloat = 1
-    @Published private(set) var inRing = false
+    @Published private(set) var instruction = "枠の中に顔を入れてください"
+    @Published private(set) var guide: FaceGuide?
+    @Published private(set) var detectedLeft: CGPoint?
+    @Published private(set) var detectedRight: CGPoint?
+    @Published private(set) var frameState = FrameState.noFace
     @Published private(set) var canUseAsBase = false
     @Published private(set) var resultText: String?
     @Published var belowTopMM: Double
@@ -250,12 +267,11 @@ final class AxisCalibrationModel: ObservableObject {
 
     private let machineID = HologramDeviceProfile.readMachineID()
     private var window: [CalibrationFeed.Sample] = []
+    private var matchedSince: TimeInterval?
     private var baseScreen = SIMD3<Float>.zero
     private var baseCamera = SIMD3<Float>.zero
     private var rightMove: (axis: Int, sign: Float, camera: String)?
     private var upMove: (axis: Int, sign: Float, camera: String)?
-    /// 前の段の位置のまま次の段を記録しないよう、正面へ戻るまで計測を始めない
-    private var armed = true
 
     init(belowTopMM: Double, rightMM: Double) {
         self.belowTopMM = belowTopMM
@@ -265,20 +281,23 @@ final class AxisCalibrationModel: ObservableObject {
 
     var title: String {
         switch stage {
-        case .front: return "1/4 正面：端末の正面に顔を置いてください。点が輪に入っていれば、カメラのずれは合っています"
-        case .right: return "2/4 右：顔を右へ 10cm 動かして止めてください"
-        case .up: return "3/4 上：正面に戻ってから、顔を上へ 10cm 動かして止めてください"
-        case .near: return "4/4 近づく：正面に戻ってから、10cm 近づいて止めてください"
-        case .verify: return "確認：端末の正面に顔を置くと、点が輪に入りますか"
+        case .front: return "正面：目印に目を合わせて、2秒止まってください"
+        case .right: return "枠に合わせて、顔を右へ動かしてください"
+        case .backFromRight, .backFromUp: return "枠に合わせて、顔を正面へ戻してください"
+        case .up: return "枠に合わせて、顔を上へ動かしてください"
+        case .near: return "枠に合わせて、顔を近づけてください"
+        case .verify: return "確認：端末の正面に顔を置くと、目が目印に合いますか"
         }
     }
 
-    var arrowText: String {
+    /// 進み具合の丸（正面・右・上・近づく）のうち、済んだ数
+    var completedSteps: Int {
         switch stage {
-        case .front, .verify: return "正面"
-        case .right: return "→ 右へ"
-        case .up: return "↑ 上へ"
-        case .near: return "近づく"
+        case .front: return 0
+        case .right: return 1
+        case .backFromRight, .up: return 2
+        case .backFromUp, .near: return 3
+        case .verify: return 4
         }
     }
 
@@ -290,45 +309,77 @@ final class AxisCalibrationModel: ObservableObject {
         case .right: t.x += Self.stepDistance
         case .up: t.y += Self.stepDistance
         case .near: t.z -= Self.stepDistance
-        case .front, .verify: break
+        case .front, .backFromRight, .backFromUp, .verify: break
         }
         return t
+    }
+
+    private func makeGuide(goal: SIMD3<Float>, map: HeadTracker.AxisMap, tracker: HeadTracker) -> FaceGuide? {
+        let half = SIMD3<Float>(Self.eyeSpacing / 2, 0, 0)
+        // 軸対応が戻せない値（手動で同じ軸を選んだなど）のときは「そのまま」で出す
+        func screen(_ m: SIMD3<Float>) -> SIMD3<Float>? { map.inverse(m) ?? HeadTracker.AxisMap.identity.inverse(m) }
+        guard let ls = screen(goal - half), let rs = screen(goal + half),
+              var l = tracker.projectForCalibration(ls, flip: overlayFlip),
+              var r = tracker.projectForCalibration(rs, flip: overlayFlip) else { return nil }
+        // 鏡写しでは左右が入れ替わるので、画面の左にある方を左の目印にする
+        if l.x > r.x { swap(&l, &r) }
+        let spacing = hypot(r.x - l.x, r.y - l.y)
+        guard spacing > 1 else { return nil }
+        let perMeter = spacing / CGFloat(Self.eyeSpacing)
+        let angle = atan2(r.y - l.y, r.x - l.x)
+        let mid = CGPoint(x: (l.x + r.x) / 2, y: (l.y + r.y) / 2)
+        let below = Self.faceCenterBelowEyes * perMeter
+        return FaceGuide(center: CGPoint(x: mid.x - sin(angle) * below, y: mid.y + cos(angle) * below),
+                         size: CGSize(width: Self.faceWidth * perMeter, height: Self.faceHeight * perMeter),
+                         leftEye: l, rightEye: r, angle: Double(angle))
     }
 
     func tick(sample: CalibrationFeed.Sample?, tracker: HeadTracker, upperHeightMM: Double) {
         let map = tracker.axisMap
         let goal = target(upperHeightMM: upperHeightMM)
-        // 軸対応が戻せない値（手動で同じ軸を選んだなど）のときは「そのまま」で輪を出す
-        let goalScreen = map.inverse(goal) ?? HeadTracker.AxisMap.identity.inverse(goal)
-        ringPoint = goalScreen.flatMap { tracker.projectForCalibration($0, flip: overlayFlip) }
-        ringScale = CGFloat(Self.frontDistance / max(goal.z, 0.05))
+        guide = makeGuide(goal: goal, map: map, tracker: tracker)
 
         guard let sample else {
-            eyePoint = nil
-            inRing = false
+            detectedLeft = nil
+            detectedRight = nil
+            frameState = .noFace
             canUseAsBase = false
+            matchedSince = nil
             window.removeAll()
-            remaining = "顔が見つかりません"
+            instruction = "枠の中に顔を入れてください"
             return
         }
-        eyePoint = tracker.projectForCalibration(sample.screen, flip: overlayFlip)
-        let radius = Self.ringRadius * ringScale
-        var entered = false
-        if let e = eyePoint, let r = ringPoint { entered = hypot(e.x - r.x, e.y - r.y) <= radius }
-        if stage == .near { entered = entered && abs(sample.screen.z - goal.z) <= 0.02 }
-        inRing = entered
-        remaining = guidance(current: map.apply(sample.screen), goal: goal)
+        let left = tracker.projectForCalibration(sample.leftEye, flip: overlayFlip)
+        let right = tracker.projectForCalibration(sample.rightEye, flip: overlayFlip)
+        detectedLeft = left
+        detectedRight = right
 
-        if !armed {
-            let away = simd_length(sample.screen - baseScreen)
-            guard away <= Self.returnRadius else {
-                remaining = "いったん正面へ戻ってください（あと \(Self.cm(away - Self.returnRadius))cm）"
-                inRing = false
-                window.removeAll()
-                return
-            }
-            armed = true
-            window.removeAll()
+        // 傾きは見えている映像の上で測る（軸対応がまだ違っていても正しく出る）
+        var tilted = false
+        if let left, let right {
+            let degrees = atan2(abs(Double(right.y - left.y)), abs(Double(right.x - left.x))) * 180 / .pi
+            tilted = degrees >= Self.tiltLimitDegrees
+        }
+
+        let isReturn = stage == .backFromRight || stage == .backFromUp
+        // 正面へ戻る段は軸対応に左右されないよう、基準の位置との距離で見る
+        let current = isReturn ? sample.screen : map.apply(sample.screen)
+        let aim = isReturn ? baseScreen : goal
+        let diff = aim - current
+        let onTarget: Bool
+        if isReturn {
+            onTarget = simd_length(diff) <= Self.returnRadius
+        } else {
+            onTarget = hypot(diff.x, diff.y) <= Self.matchRadius && abs(diff.z) <= Self.matchDistance
+        }
+        let matched = onTarget && !tilted
+        frameState = matched ? .matched : .off
+        if tilted {
+            instruction = "顔をまっすぐにしてください"
+        } else if matched {
+            instruction = stage == .verify ? "合っています" : "そのまま止まってください"
+        } else {
+            instruction = Self.guidance(diff)
         }
 
         window.append(sample)
@@ -338,22 +389,32 @@ final class AxisCalibrationModel: ObservableObject {
         let mean = window.reduce(SIMD3<Float>.zero) { $0 + $1.screen } / Float(max(window.count, 1))
         let still = filled && window.allSatisfy { simd_length($0.screen - mean) <= Self.stillRadius }
 
+        if matched {
+            if matchedSince == nil { matchedSince = sample.time }
+        } else {
+            matchedSince = nil
+        }
+        let heldOnTarget = still && (matchedSince.map { sample.time - $0 >= hold * 0.9 } ?? false)
+
         switch stage {
         case .front:
-            let okDistance = Self.frontRange.contains(mean.z)
-            canUseAsBase = still && okDistance
-            if canUseAsBase && entered { recordBase() }
+            canUseAsBase = still && Self.frontRange.contains(mean.z)
+            if heldOnTarget && canUseAsBase { recordBase() }
         case .right, .up, .near:
             canUseAsBase = false
             let delta = mean - baseScreen
             let moved = max(abs(delta.x), abs(delta.y), abs(delta.z))
-            if still && (entered || moved >= Self.recordMove) { recordStep(delta: delta, moved: moved) }
+            if still && (heldOnTarget || moved >= Self.recordMove) { recordStep(delta: delta, moved: moved) }
+        case .backFromRight:
+            if heldOnTarget { advance(to: .up) }
+        case .backFromUp:
+            if heldOnTarget { advance(to: .near) }
         case .verify:
             canUseAsBase = false
         }
     }
 
-    /// 「このまま基準にする」：軸がまだ違うと正面の輪に入れないので、距離が合って止まっていれば進める
+    /// 「このまま基準にする」：軸がまだ違うと正面の目印に合わせられないので、距離が合って止まっていれば進める
     func recordBase() {
         guard stage == .front, !window.isEmpty else { return }
         baseScreen = window.reduce(SIMD3<Float>.zero) { $0 + $1.screen } / Float(window.count)
@@ -366,6 +427,7 @@ final class AxisCalibrationModel: ObservableObject {
         guard moved >= Self.minimumMove else {
             message = "動きが 4cm 未満でした。この段をやり直します"
             window.removeAll()
+            matchedSince = nil
             return
         }
         let axis = Self.dominantAxis(delta)
@@ -379,15 +441,15 @@ final class AxisCalibrationModel: ObservableObject {
         case .right:
             guard axis != 2 else { restart("右の動きが奥行きの軸に出ました。最初からやり直します"); return }
             rightMove = (axis: axis, sign: sign, camera: cameraLabel)
-            advance(to: .up)
+            advance(to: .backFromRight)
         case .up:
             guard axis != 2, axis != rightMove?.axis else { restart("右と上で同じ軸が選ばれました。最初からやり直します"); return }
             upMove = (axis: axis, sign: sign, camera: cameraLabel)
-            advance(to: .near)
+            advance(to: .backFromUp)
         case .near:
             guard axis == 2, delta.z < 0 else { restart("近づく動きが距離の軸に出ませんでした。最初からやり直します"); return }
             finish(nearCamera: cameraLabel)
-        case .front, .verify:
+        case .front, .backFromRight, .backFromUp, .verify:
             break
         }
     }
@@ -423,8 +485,9 @@ final class AxisCalibrationModel: ObservableObject {
 
     private func advance(to next: Stage) {
         stage = next
-        armed = !(next == .up || next == .near)
         window.removeAll()
+        matchedSince = nil
+        frameState = .off
         canUseAsBase = false
     }
 
@@ -434,21 +497,17 @@ final class AxisCalibrationModel: ObservableObject {
         return best
     }
 
-    private func guidance(current c: SIMD3<Float>, goal g: SIMD3<Float>) -> String {
-        if stage == .front || stage == .verify {
-            if c.z < Self.frontRange.lowerBound { return "もう少し離れて（あと \(Self.cm(Self.frontRange.lowerBound - c.z))cm）" }
-            if c.z > Self.frontRange.upperBound { return "もう少し近づいて（あと \(Self.cm(c.z - Self.frontRange.upperBound))cm）" }
+    /// いちばん大きいずれを1つだけ案内する。d は 目標 − 現在（x 右、y 上、z 距離）
+    private static func guidance(_ d: SIMD3<Float>) -> String {
+        if abs(d.z) >= abs(d.x), abs(d.z) >= abs(d.y) {
+            return d.z < 0 ? "もう少し近づいて" : "もう少し離れて"
         }
-        if stage == .near { return g.z < c.z ? "近づいて あと \(Self.cm(c.z - g.z))cm" : "離れて あと \(Self.cm(g.z - c.z))cm" }
-        let d = g - c
-        if abs(d.x) >= abs(d.y) { return "\(d.x >= 0 ? "右" : "左")へ あと \(Self.cm(abs(d.x)))cm" }
-        return "\(d.y >= 0 ? "上" : "下")へ あと \(Self.cm(abs(d.y)))cm"
+        if abs(d.x) >= abs(d.y) { return d.x >= 0 ? "もう少し右へ" : "もう少し左へ" }
+        return d.y >= 0 ? "もう少し上へ" : "もう少し下へ"
     }
-
-    private static func cm(_ m: Float) -> String { String(format: "%.1f", m * 100) }
 }
 
-/// G3：インカメの映像を見ながら軸の向きを測る画面。
+/// G3：本人確認の顔撮影の形で、インカメの映像を見ながら軸の向きを測る画面。
 struct HologramAxisCalibrationView: View {
     @ObservedObject var tracker: HeadTracker
     @ObservedObject var diagnostics: HologramDiagnostics
@@ -457,6 +516,7 @@ struct HologramAxisCalibrationView: View {
 
     @StateObject private var feed = CalibrationFeed()
     @StateObject private var model: AxisCalibrationModel
+    @State private var showDeveloper = false
 
     init(tracker: HeadTracker, diagnostics: HologramDiagnostics,
          onNext: @escaping () -> Void, onFinish: @escaping () -> Void) {
@@ -491,12 +551,23 @@ struct HologramAxisCalibrationView: View {
         .ignoresSafeArea()
         .foregroundStyle(.white)
         .onDisappear { tracker.setCalibrationFeed(nil, viewport: .zero) }
+        .onChange(of: model.frameState) { _, state in
+            if state == .matched { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        }
         .onChange(of: model.stage) { _, stage in
             guard stage == .verify, let map = model.pendingMap, let text = model.resultText else { return }
             tracker.setAxisMap(map)
             HologramCalibrationStore.saveMeasured(map, resultText: text, machineID: HologramDeviceProfile.readMachineID())
             diagnostics.isCalibrated = true
             diagnostics.calibrationResult = text
+        }
+    }
+
+    private var frameColor: Color {
+        switch model.frameState {
+        case .noFace: return .white
+        case .off: return .yellow
+        case .matched: return .green
         }
     }
 
@@ -507,50 +578,117 @@ struct HologramAxisCalibrationView: View {
                     .resizable()
                     .frame(width: size.width, height: size.height)
             }
-            if let r = model.ringPoint {
-                let d = AxisCalibrationModel.ringRadius * model.ringScale * 2
-                Circle()
-                    .strokeBorder(model.inRing ? .green : .yellow, lineWidth: 3)
-                    .frame(width: d, height: d)
-                    .position(r)
-                Text(model.arrowText)
-                    .font(.caption.bold())
-                    .padding(4)
-                    .background(.black.opacity(0.55), in: Capsule())
-                    .position(x: r.x, y: max(r.y - d / 2 - 14, 12))
+            if let g = model.guide {
+                faceGuide(g, size: size)
+                    .animation(.easeInOut(duration: 0.45), value: model.stage)
             }
-            if let e = model.eyePoint {
-                Circle().fill(.cyan).frame(width: 10, height: 10).position(e)
+            detectedEye(model.detectedLeft)
+            detectedEye(model.detectedRight)
+            VStack(spacing: 6) {
+                progressDots
+                Text(model.instruction)
+                    .font(.headline)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.6), in: Capsule())
             }
+            .padding(.top, 8)
+            .frame(width: size.width)
+            trackingStatus
+                .frame(width: size.width, height: size.height, alignment: .bottomTrailing)
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
+    }
+
+    /// 枠の外を暗くし、顔の枠と目の目印を描く
+    private func faceGuide(_ g: AxisCalibrationModel.FaceGuide, size: CGSize) -> some View {
+        let spacing = hypot(g.rightEye.x - g.leftEye.x, g.rightEye.y - g.leftEye.y)
+        let mid = CGPoint(x: (g.leftEye.x + g.rightEye.x) / 2, y: (g.leftEye.y + g.rightEye.y) / 2)
+        let dash: [CGFloat] = model.frameState == .noFace ? [8, 6] : []
+        return ZStack(alignment: .topLeading) {
+            ZStack(alignment: .topLeading) {
+                Color.black.opacity(0.55)
+                Ellipse()
+                    .frame(width: g.size.width, height: g.size.height)
+                    .rotationEffect(.radians(g.angle))
+                    .position(g.center)
+                    .blendMode(.destinationOut)
+            }
+            .compositingGroup()
+            .frame(width: size.width, height: size.height)
+
+            Ellipse()
+                .stroke(frameColor, style: StrokeStyle(lineWidth: 3, dash: dash))
+                .frame(width: g.size.width, height: g.size.height)
+                .rotationEffect(.radians(g.angle))
+                .position(g.center)
+            Rectangle()
+                .fill(frameColor.opacity(0.8))
+                .frame(width: spacing, height: 1)
+                .rotationEffect(.radians(g.angle))
+                .position(mid)
+            eyeMark.position(g.leftEye)
+            eyeMark.position(g.rightEye)
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+        .allowsHitTesting(false)
+    }
+
+    /// 目標の目印：枠と同じ色の輪
+    private var eyeMark: some View {
+        Circle().stroke(frameColor, lineWidth: 2).frame(width: 14, height: 14)
+    }
+
+    /// ARKit が見つけた目：水色のひし形（目標の輪と区別する）
+    @ViewBuilder private func detectedEye(_ point: CGPoint?) -> some View {
+        if let point {
+            Rectangle()
+                .fill(.cyan)
+                .frame(width: 6, height: 6)
+                .rotationEffect(.degrees(45))
+                .position(point)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// 進み具合（正面・右・上・近づく）。済んだ段は緑
+    private var progressDots: some View {
+        HStack(spacing: 8) {
+            ForEach(0..<4, id: \.self) { i in
+                Circle()
+                    .fill(i < model.completedSteps ? Color.green : Color.white.opacity(0.35))
+                    .frame(width: 10, height: 10)
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel("4段のうち \(model.completedSteps) 段済み")
+    }
+
+    /// 顔が見つからない原因の切り分け：追跡状態、アンカー数、顔アンカーの isTracked
+    private var trackingStatus: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+            let d = tracker.diagnosticsSnapshot()
+            let tracked = d.lastFaceTracked.map { $0 ? "true" : "false" } ?? "顔アンカーなし"
+            Text("追跡 \(d.cameraState)\nアンカー \(d.lastAnchorCount)（顔 \(d.lastFaceAnchorCount)）\nisTracked \(tracked)\n映像の180°補正 \(tracker.calibrationVideoRotated ? "あり" : "なし")")
+                .font(.system(size: 9, design: .monospaced))
+                .multilineTextAlignment(.trailing)
+                .padding(4)
+                .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 4))
+                .padding(4)
+        }
+        .allowsHitTesting(false)
     }
 
     private var controls: some View {
         ScrollView {
             VStack(spacing: 8) {
                 Text(model.title).font(.headline).multilineTextAlignment(.center)
-                Text(model.remaining).font(.title2.bold()).monospacedDigit()
                 if !model.message.isEmpty {
                     Text(model.message).font(.footnote).foregroundStyle(.orange).multilineTextAlignment(.center)
                 }
                 if let result = model.resultText {
                     Text(result).font(.system(.footnote, design: .monospaced)).multilineTextAlignment(.center)
                 }
-                Text(HologramDeviceProfile.cameraPositionText(belowTopMM: model.belowTopMM, rightMM: model.rightMM))
-                    .font(.system(.caption, design: .monospaced))
-                    .multilineTextAlignment(.center)
-                CalibrationNudgePad { right, down in
-                    model.rightMM += right
-                    model.belowTopMM = max(model.belowTopMM + down, 0)
-                }
-                HStack(spacing: 14) {
-                    Button("カメラ位置を決定") {
-                        diagnostics.saveManualCamera(belowTopMM: model.belowTopMM, rightMM: model.rightMM)
-                    }
-                    Button("点の左右を反転") { model.setFlip(!model.overlayFlip) }
-                }
-                .font(.caption)
                 HStack(spacing: 18) {
                     if model.stage == .front {
                         Button("このまま基準にする") { model.recordBase() }
@@ -560,10 +698,30 @@ struct HologramAxisCalibrationView: View {
                     if model.stage == .verify {
                         Button("次へ（箱の確認）", action: onNext).bold()
                     } else {
-                        Button("やめる", action: onFinish).bold()
+                        Button("やめる", action: onFinish)
                     }
                 }
-                .font(.callout)
+                .font(.caption)
+                DisclosureGroup("開発用", isExpanded: $showDeveloper) {
+                    VStack(spacing: 8) {
+                        Text(HologramDeviceProfile.cameraPositionText(belowTopMM: model.belowTopMM, rightMM: model.rightMM))
+                            .font(.system(.caption, design: .monospaced))
+                            .multilineTextAlignment(.center)
+                        CalibrationNudgePad { right, down in
+                            model.rightMM += right
+                            model.belowTopMM = max(model.belowTopMM + down, 0)
+                        }
+                        HStack(spacing: 14) {
+                            Button("カメラ位置を決定") {
+                                diagnostics.saveManualCamera(belowTopMM: model.belowTopMM, rightMM: model.rightMM)
+                            }
+                            Button("点の左右を反転") { model.setFlip(!model.overlayFlip) }
+                        }
+                        .font(.caption)
+                    }
+                    .padding(.top, 6)
+                }
+                .font(.caption)
             }
             .padding(12)
         }
