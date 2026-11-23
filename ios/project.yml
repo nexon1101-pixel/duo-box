@@ -61,7 +61,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.duoremote.app.debug
         # Sandbox のビルド番号（ホログラム改善計画のパス番号に合わせて上げる。本番 DuoBox は共通設定の値のまま）
-        CURRENT_PROJECT_VERSION: "112"
+        CURRENT_PROJECT_VERSION: "113"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: NO
@@ -69,6 +69,8 @@ targets:
       path: DuoBoxDebug/Info.plist
       properties:
         CFBundleDisplayName: DuoBox Sandbox
+        # 診断パネルの「ビルド」にビルド番号が出るよう、設定値を Info.plist へ渡す（無いと XcodeGen の既定の 1 になる）
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSCameraUsageDescription: 顔の位置を見て、箱の中の見え方を変えるためにカメラを使います
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:

@@ -2,6 +2,7 @@ import ARKit
 import AVFoundation
 import CoreImage
 import SwiftUI
+import simd
 
 /// 顔トラッキングで「目の位置」を取る。座標は **フロントカメラのレンズを原点にした、画面の向き基準**（単位はメートル）。
 /// ARKit の viewMatrix(for: 画面の向き) で変換する（x: 画面の右、y: 画面の上、−z: 画面の前）。
@@ -109,6 +110,14 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
 
     /// 選んだ向き：自撮りの映像を時計回りに 90° × この数だけ回すと、顔がまっすぐになる（0〜3）
     @Published private(set) var videoTurns = 0
+    /// 片目を閉じたときに、開いている方の目を使うか（既定はオン）
+    static let closedBlink: Float = 0.6   // これより大きければ閉じている
+    static let openBlink: Float = 0.35    // これより小さければ開いている
+    private var _useOpenEye = true
+    var useOpenEye: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _useOpenEye }
+        set { lock.lock(); _useOpenEye = newValue; lock.unlock() }
+    }
     private var lockedVideoTurns = 0
 
     /// 向きを選び直す。変わったときは true を返し、前の向きで測った軸対応を「そのまま」へ戻す
@@ -294,6 +303,17 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         var lastError: String?
         var interrupted = false
         var videoFormats = 0              // ARFaceTrackingConfiguration.supportedVideoFormats の数
+        var usedEye = "—"                 // 目の位置に使っている目（両目の中点／開いている方の目）
+        /// カメラの内部パラメータ（画素）と映像の解像度。画角が実際と合っているかの確認用
+        var intrinsics: simd_float3x3?
+        var imageResolution: CGSize = .zero
+        /// 横（映像の幅の方向）と縦（高さの方向）の画角（度）
+        var fieldOfViewDeg: (width: Double, height: Double)? {
+            guard let k = intrinsics, imageResolution.width > 0, k[0][0] > 0, k[1][1] > 0 else { return nil }
+            let fx = Double(k[0][0]), fy = Double(k[1][1])
+            return (2 * atan(Double(imageResolution.width) / 2 / fx) * 180 / .pi,
+                    2 * atan(Double(imageResolution.height) / 2 / fy) * 180 / .pi)
+        }
     }
     private var _diag = Diagnostics()
     func diagnosticsSnapshot() -> Diagnostics { lock.lock(); defer { lock.unlock() }; return _diag }
@@ -392,6 +412,8 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
             $0.lastFaceAnchorCount = faces.count
             $0.lastFaceTracked = faces.first?.isTracked
             $0.cameraState = camState
+            $0.intrinsics = frame.camera.intrinsics
+            $0.imageResolution = frame.camera.imageResolution
         }
         feedCalibrationVideo(frame)
         guard let face = faces.first, face.isTracked else {
@@ -400,10 +422,22 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
             publish(.searching)
             return
         }
-        // 目の位置＝左右の目の中点（顔アンカーのローカル座標 → ARKit のワールド座標）
+        // 目の位置＝左右の目の中点（顔アンカーのローカル座標 → ARKit のワールド座標）。
+        // 片目を閉じて見ているときは、開いている方の目を使う（中点のままだと約 3cm 横にずれる）
         let leftEye = simd_mul(face.transform, face.leftEyeTransform).columns.3
         let rightEye = simd_mul(face.transform, face.rightEyeTransform).columns.3
-        let eyeMid = (leftEye + rightEye) * 0.5
+        let blinkL = face.blendShapes[.eyeBlinkLeft]?.floatValue ?? 0
+        let blinkR = face.blendShapes[.eyeBlinkRight]?.floatValue ?? 0
+        let eyeMid: SIMD4<Float>
+        let usedEye: String
+        if useOpenEye && blinkL > Self.closedBlink && blinkR < Self.openBlink {
+            eyeMid = rightEye; usedEye = "右目（左目を閉じている）"
+        } else if useOpenEye && blinkR > Self.closedBlink && blinkL < Self.openBlink {
+            eyeMid = leftEye; usedEye = "左目（右目を閉じている）"
+        } else {
+            eyeMid = (leftEye + rightEye) * 0.5; usedEye = "両目の中点"
+        }
+        updateDiag { $0.usedEye = usedEye }
         // カメラ座標へ直す（カメラは端末と一緒に動くので、カメラから見た相対位置を取る）
         let rel = simd_mul(simd_inverse(frame.camera.transform), eyeMid)
         // 画面の向きに合わせた座標（x 右、y 上、−z 前）を ARKit から取る。向きはメインで更新したキャッシュ

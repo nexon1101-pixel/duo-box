@@ -1,5 +1,6 @@
 import QuartzCore
 import SceneKit
+import simd
 import SwiftUI
 
 /// 計測パネルへ渡す、画面（コンテナ）側で分かる値。
@@ -25,12 +26,12 @@ final class HologramDiagnostics: ObservableObject {
             HologramCalibrationStore.savePredictionMS(oePredMS, machineID: machineID)
         }
     }
-    /// 距離の倍率（機種ごとに保存）。カメラから見た目の位置の x・y・z に掛ける
-    @Published var distanceScale: Double = 1 {
-        didSet {
-            guard tunesReady else { return }
-            HologramCalibrationStore.saveDistanceScale(distanceScale, machineID: machineID)
-        }
+    /// 動きの量の倍率（機種ごとに保存）。カメラから見た目の位置の x（左右）、y（上下）だけに掛ける
+    @Published var gainX: Double = 1 { didSet { saveGains() } }
+    @Published var gainY: Double = 1 { didSet { saveGains() } }
+    private func saveGains() {
+        guard tunesReady else { return }
+        HologramCalibrationStore.saveGains(x: gainX, y: gainY, machineID: machineID)
     }
     /// 実寸計測（パネル①）のクレカの棒の長さ (pt)
     @Published var rulerBarLength: Double = 200 { didSet { saveTunes() } }
@@ -70,7 +71,8 @@ final class HologramDiagnostics: ObservableObject {
         if let v = number("oeBeta") { oeBeta = v }
         if let v = number("oePredMS") { oePredMS = min(max(v, 0), 120) }
         if let v = HologramCalibrationStore.predictionMS(machineID: machineID) { oePredMS = v }
-        distanceScale = HologramCalibrationStore.distanceScale(machineID: machineID)
+        gainX = HologramCalibrationStore.gainX(machineID: machineID)
+        gainY = HologramCalibrationStore.gainY(machineID: machineID)
         if let v = number("rulerBarLength") { rulerBarLength = v }
         if let v = t["showMarkers"] as? Bool { showMarkers = v }
         if let v = t["showGrid"] as? Bool { showGrid = v }
@@ -146,7 +148,8 @@ final class HologramDiagnostics: ObservableObject {
         oeMinCutoff = 1.2
         oeBeta = 0.8
         oePredMS = 20
-        distanceScale = 1
+        gainX = 1
+        gainY = 1
         showMarkers = false
         showGrid = true
     }
@@ -190,6 +193,7 @@ struct HologramDebugPanel: View {
     /// 設定をコピーした時刻（「コピーしました」を少しの間出す）
     @State private var copiedAt: Date?
     @State private var confirmReset = false
+    @State private var resetAt: Date?
     /// 開発用：カメラ位置の手動入力
     @State private var devBelowText = ""
     @State private var devRightText = ""
@@ -207,8 +211,17 @@ struct HologramDebugPanel: View {
                     .buttonStyle(.borderedProminent)
                 Button(isLBoxOpen ? "L字の確認の箱を閉じる" : "L字の確認の箱を開く", action: onToggleLBox)
                     .buttonStyle(.bordered)
-                Button("調整値を既定に戻す") { confirmReset = true }
-                    .font(.caption)
+                HStack {
+                    Button("調整値を既定に戻す") { confirmReset = true }
+                        .font(.caption)
+                    TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                        if let resetAt, context.date.timeIntervalSince(resetAt) < 2 {
+                            Text("既定に戻しました").font(.caption).foregroundStyle(.green)
+                        }
+                    }
+                }
+                Text("このパネルは、画面を三本指でタップすると開閉できます")
+                    .font(.caption2).foregroundStyle(.white.opacity(0.7))
                 distanceSection
                 Divider()
                 rulerSection
@@ -236,10 +249,13 @@ struct HologramDebugPanel: View {
             .padding(14)
         }
         .alert("調整値を既定に戻しますか", isPresented: $confirmReset) {
-            Button("戻す", role: .destructive) { diagnostics.resetTunes() }
+            Button("戻す", role: .destructive) {
+                diagnostics.resetTunes()
+                resetAt = Date()
+            }
             Button("やめる", role: .cancel) {}
         } message: {
-            Text("壁の下げ量 30mm、p・w 自動（p の既定 1.0）、身長 ×1.0、距離の倍率 ×1.00、先読み 20ms などに戻します。キャリブレーションの結果、角度ごとの記録、クレカの棒は消えません")
+            Text("壁の下げ量 30mm、p・w 自動（p の既定 1.0）、身長 ×1.0、動きの量の倍率 ×1.00、先読み 20ms などに戻します。キャリブレーションの結果、角度ごとの記録、クレカの棒は消えません")
         }
         .foregroundStyle(.white)
         .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
@@ -261,8 +277,10 @@ struct HologramDebugPanel: View {
                         .font(.system(size: 44, weight: .bold, design: .monospaced))
                     Text("ARKit の目までの距離（倍率を掛ける前）")
                         .font(.caption2).foregroundStyle(.white.opacity(0.7))
-                    row("倍率を掛けた距離", active ? String(format: "%.1f cm", rawCM * diagnostics.distanceScale) : "—")
+                    row("動きの量の倍率", String(format: "左右 ×%.2f／上下 ×%.2f", diagnostics.gainX, diagnostics.gainY))
                     row("描画までの遅れ（平均）", diagnostics.rig?.averageLatencyMS.map { String(format: "%.1f ms", $0) } ?? "—")
+                    Text("遅れは描画の命令を出し終えるまで。画面に出るまでは、さらに 1〜2 フレーム（約 16〜33ms）かかる")
+                        .font(.caption2).foregroundStyle(.white.opacity(0.7))
                 }
                 .font(.system(.footnote, design: .monospaced))
             }
@@ -347,7 +365,7 @@ struct HologramDebugPanel: View {
         }
         row("選んだ映像の向き", "\(tracker.videoTurns * 90)°")
         row("軸対応の結果", diagnostics.calibrationResult ?? "キャリブレーション未実施")
-        row("箱の確認", diagnostics.boxCheck.map { $0 ? "はい（奥に止まって見える）" : "いいえ（G2・G3 をやり直す）" } ?? "未回答")
+        row("箱の確認", diagnostics.boxCheck.map { $0 ? "はい（奥に止まって見える）" : "いいえ（カメラ位置と軸の合わせ直しが必要）" } ?? "未回答")
         row("occlusion 変換前 frame（使用）", p.occlusionRawFrame.map(frameText) ?? "なし")
         row("occlusion 変換後 frame（使用）", p.occlusionFrame.map(frameText) ?? "なし")
         row("occlusion 変換の根拠", p.occlusionMethod ?? "—")
@@ -382,7 +400,7 @@ struct HologramDebugPanel: View {
     private var roomSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("③ 部屋・配置").font(.subheadline.bold())
-            Text("壁を奥へ下げる量 wallRecess: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 30）")
+            Text("壁を奥へ下げる量: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 30）")
                 .font(.caption)
             Slider(value: $diagnostics.wallRecessMM, in: 0...100, step: 1)
             TimelineView(.periodic(from: .now, by: 0.5)) { _ in
@@ -445,6 +463,13 @@ struct HologramDebugPanel: View {
                     row("セッション", d.sessionState)
                     row("フレーム数", "\(d.frames)（最後: \(since)）")
                     row("アンカー", "計\(d.lastAnchorCount)／顔\(d.lastFaceAnchorCount)／isTracked \(d.lastFaceTracked.map { $0 ? "true" : "false" } ?? "—")")
+                    if let k = d.intrinsics {
+                        row("カメラ内部 fx・fy", String(format: "%.1f・%.1f", k[0][0], k[1][1]))
+                        row("カメラ内部 cx・cy", String(format: "%.1f・%.1f", k[2][0], k[2][1]))
+                    }
+                    row("映像の解像度", String(format: "%.0f×%.0f", d.imageResolution.width, d.imageResolution.height))
+                    row("画角（幅方向・高さ方向）", d.fieldOfViewDeg.map { String(format: "%.1f°・%.1f°", $0.width, $0.height) } ?? "—")
+                    row("目の位置に使っている目", d.usedEye)
                     row("カメラ状態", d.cameraState)
                     row("対応フォーマット数", "\(d.videoFormats)")
                     row("中断", d.interrupted ? "中断中" : "なし")
@@ -523,10 +548,21 @@ struct HologramDebugPanel: View {
         let p = diagnostics.cameraProfile
         return VStack(alignment: .leading, spacing: 8) {
             Text("開発用").font(.subheadline.bold())
-            Text("距離の倍率: ×\(String(format: "%.2f", diagnostics.distanceScale))（機種ごとに保存）")
+            Text("動きの量の倍率（機種ごとに保存。ふだんは「本物の物と比べる」で合わせる）").font(.caption)
+            HStack {
+                Text("左右 ×\(String(format: "%.2f", diagnostics.gainX))").font(.caption.monospacedDigit())
+                Slider(value: $diagnostics.gainX, in: HologramCalibrationStore.gainRange,
+                       step: HologramCalibrationStore.gainStep)
+            }
+            HStack {
+                Text("上下 ×\(String(format: "%.2f", diagnostics.gainY))").font(.caption.monospacedDigit())
+                Slider(value: $diagnostics.gainY, in: HologramCalibrationStore.gainRange,
+                       step: HologramCalibrationStore.gainStep)
+            }
+            Toggle("片目を閉じたら、開いている方の目を使う", isOn: Binding(
+                get: { tracker.useOpenEye },
+                set: { tracker.useOpenEye = $0 }))
                 .font(.caption)
-            Slider(value: $diagnostics.distanceScale, in: HologramCalibrationStore.distanceScaleRange,
-                   step: HologramCalibrationStore.distanceScaleStep)
             Divider()
             Text("軸対応（手動）").font(.caption.bold())
             Text("画面の右＝ \(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: m.xAxis, sign: m.xSign)])　画面の上＝ \(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: m.yAxis, sign: m.ySign)])（画面座標の軸）")
@@ -786,8 +822,17 @@ struct HologramDebugPanel: View {
         lines.append("β: \(num(d.oeBeta, 2))")
         lines.append("先読み: \(num(d.oePredMS, 0)) ms")
         lines.append("先読み上限: \(num(HologramRig.predictionLimit(seconds: Float(d.oePredMS / 1000)) * 1000)) mm")
-        lines.append("距離の倍率: ×\(num(d.distanceScale, 2))")
+        lines.append("動きの量の倍率: 左右 ×\(num(d.gainX, 2))／上下 ×\(num(d.gainY, 2))")
         lines.append("描画までの遅れ（平均）: \(num(d.rig?.averageLatencyMS, 1)) ms")
+        let td = tracker.diagnosticsSnapshot()
+        if let k = td.intrinsics {
+            lines.append("カメラ内部: fx \(num(k[0][0], 1)) fy \(num(k[1][1], 1)) cx \(num(k[2][0], 1)) cy \(num(k[2][1], 1))")
+        }
+        lines.append("目の位置に使っている目: \(td.usedEye)")
+        lines.append("映像の解像度: \(num(Double(td.imageResolution.width), 0))×\(num(Double(td.imageResolution.height), 0))")
+        if let f = td.fieldOfViewDeg {
+            lines.append("画角（幅方向・高さ方向）: \(num(f.width, 1))°・\(num(f.height, 1))°")
+        }
 
         lines.append("")
         lines.append("【定数】")

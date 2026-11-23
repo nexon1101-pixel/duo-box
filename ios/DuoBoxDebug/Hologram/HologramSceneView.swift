@@ -95,9 +95,17 @@ final class HologramRig {
     private var _oePred: Float = 0.02        // 先読み時間 (秒)
     func setOneEuroPred(_ v: Float) { tuneLock.lock(); _oePred = min(max(v, 0), 0.12); tuneLock.unlock() }
     private var oePred: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _oePred }
-    private var _distanceScale: Float = 1    // 距離の倍率（カメラから見た目の位置の x・y・z に掛ける）
-    func setDistanceScale(_ v: Float) { tuneLock.lock(); _distanceScale = min(max(v, 0.6), 1.6); tuneLock.unlock() }
-    private var distanceScale: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _distanceScale }
+    /// 動きの量の倍率。カメラから見た目の位置の x（左右）と y（上下）だけに掛け、距離 z には掛けない。
+    /// ARKit がこの内側カメラの画角をずれた値で計算していると、頭の動きが実際より大きく（小さく）出るので、その補正に使う
+    private var _gainX: Float = 1
+    private var _gainY: Float = 1
+    func setGains(x: Float, y: Float) {
+        tuneLock.lock()
+        _gainX = min(max(x, 0.5), 1.5)
+        _gainY = min(max(y, 0.5), 1.5)
+        tuneLock.unlock()
+    }
+    private var gains: SIMD2<Float> { tuneLock.lock(); defer { tuneLock.unlock() }; return SIMD2(_gainX, _gainY) }
     private var _pAuto: Bool = true          // 前後位置 p を角度で自動にするか（既定は自動）
     func setPAuto(_ v: Bool) { tuneLock.lock(); _pAuto = v; tuneLock.unlock() }
     private var pAuto: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _pAuto }
@@ -979,9 +987,10 @@ final class HologramRig {
         if let tracker, tracker.faceActive {
             // 絶対位置のみ（手順4）：目の位置 = カメラの位置（機種プロファイル）+ 軸対応を適用した目位置。
             // ホーム基準と視差ゲインは廃止。目の絶対位置のずれは機種プロファイル側で吸収する。
-            // 距離の倍率は、カメラから見た位置の x・y・z に掛ける（カメラ位置を足す前）
+            // 動きの量の倍率は、カメラから見た位置の x・y だけに掛ける（カメラ位置を足す前。距離 z はそのまま）
             let sample = tracker.eyeSample
-            let candidate = cameraPosition + sample.position * distanceScale
+            let g = gains
+            let candidate = cameraPosition + SIMD3<Float>(sample.position.x * g.x, sample.position.y * g.y, sample.position.z)
             if candidate.x.isFinite && candidate.y.isFinite && candidate.z.isFinite {
                 target = candidate
                 usedFrameTime = sample.frameTime
@@ -1295,7 +1304,8 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
                 .store(in: &cancellables)
             diagnostics.$oePredMS.sink { [weak self] v in self?.rig.setOneEuroPred(Float(v) / 1000) }
                 .store(in: &cancellables)
-            diagnostics.$distanceScale.sink { [weak self] v in self?.rig.setDistanceScale(Float(v)) }
+            diagnostics.$gainX.combineLatest(diagnostics.$gainY)
+                .sink { [weak self] x, y in self?.rig.setGains(x: Float(x), y: Float(y)) }
                 .store(in: &cancellables)
             diagnostics.$pAuto.sink { [weak self] v in self?.rig.setPAuto(v) }
                 .store(in: &cancellables)

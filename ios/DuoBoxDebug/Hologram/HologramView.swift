@@ -32,9 +32,9 @@ struct HologramView: View {
             else { line += "（まだ一度も捕捉なし）" }
         }
         if let deg = hinge.angleDegrees {
-            return "\(line)｜ヒンジ \(Int(deg.rounded()))°"
+            return "\(line)｜折り角 \(Int(deg.rounded()))°"
         }
-        return "\(line)｜ヒンジ角度なし（全開扱い）"
+        return "\(line)｜折り角が取れません（全開として表示）"
     }
 
     /// 次の表示状態。角度が取れなければ開いている扱い（出さない）
@@ -81,8 +81,8 @@ struct HologramView: View {
             .allowsHitTesting(false)
 
             if !diagnostics.isCalibrated {
-                Text("キャリブレーション未実施")
-                    .font(.caption2)
+                Text("初回の設定が未完了です（三本指でタップ → キャリブレーション）")
+                    .font(.caption)
                     .foregroundStyle(.white.opacity(0.7))
                     .padding(6)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
@@ -111,7 +111,8 @@ struct HologramView: View {
             }
 
             // 本番 RootView と同じ見た目の戻るボタン
-            if !hideHomeButton {
+            // 比べる場面と L 字の箱では、下パネルの十字・棒・箱に重なるので出さない
+            if !hideHomeButton && !showCompare && !showLBox {
                 Button(action: onExit) {
                     Image(systemName: "house.fill")
                         .font(.system(size: 18, weight: .semibold))

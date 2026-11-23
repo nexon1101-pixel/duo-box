@@ -179,7 +179,7 @@ struct HologramCameraAlignView: View {
                     useOcclusion = false
                 }
                 HStack {
-                    Button("occlusion の値に戻す", action: resetToOcclusion)
+                    Button("端末が読み取った位置に戻す", action: resetToOcclusion)
                         .disabled(diagnostics.cameraProfile.occlusionBelowTopMM == nil)
                     Button("左右を反転した値にする") {
                         rightMM = -rightMM
@@ -316,7 +316,7 @@ struct HologramBoxCheckView: View {
         HStack(spacing: 10) {
             Text(answeredNo ? "カメラ位置と軸を合わせ直してください" : "片目で頭を左右に：箱は奥に止まって見える？")
                 .font(.footnote.bold())
-                .lineLimit(1)
+                .lineLimit(2)
                 .minimumScaleFactor(0.7)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if answeredNo {
@@ -384,7 +384,8 @@ struct HologramLBoxView: View {
             let fold = profileFold > 0 ? profileFold : geo.size.height / 2
             HStack(spacing: 20) {
                 VStack(spacing: 0) {
-                    Text("ヒンジ角").font(.caption)
+                    Text("折り角").font(.caption)
+                    Text("計測パネルは三本指タップで開きます").font(.caption2).foregroundStyle(.white.opacity(0.7))
                     Text(hinge.angleDegrees.map { "\(Int($0.rounded()))°" } ?? "取得なし")
                         .font(.system(size: 56, weight: .bold, design: .monospaced))
                         .minimumScaleFactor(0.5)
@@ -407,7 +408,7 @@ struct HologramLBoxView: View {
     }
 }
 
-/// 本物の物と仮想の棒を横に並べて、先読みを合わせる場面。
+/// 本物の物と仮想の棒を横に並べて、動きの量（左右・上下）と先読みを合わせる場面。
 /// 十字と棒を隠さないよう、操作は上パネルの上側だけに置く。決定するまで保存しない
 struct HologramCompareView: View {
     @ObservedObject var tracker: HeadTracker
@@ -415,15 +416,18 @@ struct HologramCompareView: View {
     var onFinish: () -> Void
 
     private static let predictionButtonStepMS: Double = 5
+    private static let gainButtonStep: Double = 0.05
     @State private var rodCM: Double = 4
     @State private var predictionMS: Double = 20
+    @State private var gainX: Double = 1
+    @State private var gainY: Double = 1
 
     var body: some View {
         GeometryReader { geo in
             let profileFold = diagnostics.cameraProfile.foldYPt
             let fold = profileFold > 0 ? profileFold : geo.size.height / 2
             ScrollView { controls.padding(12) }
-                .frame(width: geo.size.width, height: max(fold * 0.62, 0))
+                .frame(width: geo.size.width, height: max(fold * 0.72, 0))
                 .background(Color.black.opacity(0.85))
         }
         .ignoresSafeArea()
@@ -431,6 +435,8 @@ struct HologramCompareView: View {
         .onAppear {
             tracker.start()   // 動いていれば何もしない
             predictionMS = min(diagnostics.oePredMS, HologramCalibrationStore.predictionRangeMS.upperBound)
+            gainX = diagnostics.gainX
+            gainY = diagnostics.gainY
             diagnostics.rig?.setCompareRodHeight(Float(rodCM / 100))
             diagnostics.rig?.setCompareMode(true)
         }
@@ -438,36 +444,66 @@ struct HologramCompareView: View {
             // 決定していなければ、保存済みの値へ戻る
             diagnostics.rig?.setCompareMode(false)
             diagnostics.rig?.setOneEuroPred(Float(diagnostics.oePredMS / 1000))
+            diagnostics.rig?.setGains(x: Float(diagnostics.gainX), y: Float(diagnostics.gainY))
         }
         .onChange(of: rodCM) { _, v in diagnostics.rig?.setCompareRodHeight(Float(v / 100)) }
         .onChange(of: predictionMS) { _, v in diagnostics.rig?.setOneEuroPred(Float(v / 1000)) }
+        .onChange(of: gainX) { _, _ in applyGains() }
+        .onChange(of: gainY) { _, _ in applyGains() }
     }
 
     private var controls: some View {
-        VStack(spacing: 8) {
-            Text("十字の上に、ペンのキャップなどを立て、仮想の棒の高さをキャップに合わせてください。片目を閉じて頭をゆっくり動かし、2本の先の並びが変わらなければ合っています")
+        VStack(spacing: 10) {
+            Text("十字の上にペンのキャップなどを立て、棒の高さをキャップに合わせます。片目を閉じて頭をゆっくり動かし、2本の先の並びが変わらなくなるように、下のボタンで合わせてください")
                 .font(.subheadline.bold())
                 .multilineTextAlignment(.center)
             if tracker.mode != .tracking {
                 Text("顔が見えていません").font(.caption).foregroundStyle(.orange)
             }
-            predictionControls
             HStack {
-                Text("棒の高さ \(String(format: "%.1f", rodCM)) cm").font(.caption)
+                Text("棒の高さ \(String(format: "%.1f", rodCM)) cm").font(.caption.monospacedDigit())
                 Slider(value: $rodCM, in: 2...6, step: 0.5)
             }
+            gainRow(title: "① 頭を左右に動かす", value: $gainX)
+            gainRow(title: "② 頭を上下に動かす", value: $gainY)
+            predictionControls
             HStack(spacing: 28) {
                 Button("やめる", action: onFinish)
+                Button("元に戻す") {
+                    gainX = 1; gainY = 1
+                    predictionMS = 20
+                }
                 Button("決定", action: decide).bold()
             }
         }
     }
 
+    /// 仮想の棒の動きの量を合わせる1行。ボタンの言葉は「見えたこと」で選べるようにする
+    private func gainRow(title: String, value: Binding<Double>) -> some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text(title).font(.caption.bold())
+                Spacer()
+                Text("×\(String(format: "%.2f", value.wrappedValue))").font(.caption.monospacedDigit())
+            }
+            HStack {
+                Button("仮想の方が\n大きく動く") { nudge(value, -Self.gainButtonStep) }
+                Button("仮想の方が\n小さく動く") { nudge(value, Self.gainButtonStep) }
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+        }
+    }
+
     private var predictionControls: some View {
-        VStack(spacing: 6) {
-            Text("先読み \(String(format: "%.0f", predictionMS)) ms").font(.caption.bold())
+        VStack(spacing: 4) {
+            HStack {
+                Text("③ 速く動かす（遅れ）").font(.caption.bold())
+                Spacer()
+                Text("先読み \(String(format: "%.0f", predictionMS)) ms").font(.caption.monospacedDigit())
+            }
             TimelineView(.periodic(from: .now, by: 0.5)) { _ in
-                Text("平均の遅れ：\(latencyText)").font(.caption2)
+                Text("描画までの遅れ（平均）：\(latencyText)").font(.caption2)
             }
             HStack {
                 Button("仮想の方が\n遅れる") { nudgePrediction(Self.predictionButtonStepMS) }
@@ -475,7 +511,6 @@ struct HologramCompareView: View {
             }
             .font(.caption)
             .buttonStyle(.bordered)
-            Slider(value: $predictionMS, in: HologramCalibrationStore.predictionRangeMS, step: 1)
         }
         .frame(maxWidth: .infinity)
     }
@@ -484,13 +519,23 @@ struct HologramCompareView: View {
         diagnostics.rig?.averageLatencyMS.map { String(format: "%.0f ms", $0) } ?? "—"
     }
 
+    private func nudge(_ value: Binding<Double>, _ delta: Double) {
+        value.wrappedValue = HologramCalibrationStore.clampedGain(value.wrappedValue + delta)
+    }
+
     private func nudgePrediction(_ delta: Double) {
         let r = HologramCalibrationStore.predictionRangeMS
         predictionMS = min(max(predictionMS + delta, r.lowerBound), r.upperBound)
     }
 
+    private func applyGains() {
+        diagnostics.rig?.setGains(x: Float(gainX), y: Float(gainY))
+    }
+
     private func decide() {
         diagnostics.oePredMS = predictionMS
+        diagnostics.gainX = gainX
+        diagnostics.gainY = gainY
         onFinish()
     }
 }
@@ -1057,13 +1102,16 @@ struct HologramAxisCalibrationView: View {
     private var trackingStatus: some View {
         TimelineView(.periodic(from: .now, by: 0.5)) { _ in
             let d = tracker.diagnosticsSnapshot()
-            let tracked = d.lastFaceTracked.map { $0 ? "true" : "false" } ?? "顔アンカーなし"
-            Text("追跡 \(d.cameraState)\nアンカー \(d.lastAnchorCount)（顔 \(d.lastFaceAnchorCount)）\nisTracked \(tracked)\n映像の向き \(tracker.videoTurns * 90)°")
-                .font(.system(size: 9, design: .monospaced))
-                .multilineTextAlignment(.trailing)
-                .padding(4)
-                .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 4))
-                .padding(4)
+            let seen = d.lastFaceTracked == true
+            // 顔が見えているときは何も出さない。見えていないときだけ、原因の見当になる情報を出す
+            if !seen {
+                Text("顔：見えていません\n（カメラの状態 \(d.cameraState)、顔の候補 \(d.lastFaceAnchorCount)）")
+                    .font(.system(size: 11, design: .monospaced))
+                    .multilineTextAlignment(.trailing)
+                    .padding(4)
+                    .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 4))
+                    .padding(4)
+            }
         }
         .allowsHitTesting(false)
     }
