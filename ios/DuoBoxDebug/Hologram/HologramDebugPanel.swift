@@ -7,17 +7,19 @@ final class HologramDiagnostics: ObservableObject {
     /// 配置・描画の現在値を読むための参照（パネルが定期的に読む）
     weak var rig: HologramRig?
     /// 調整値：壁を奥へ下げる量（mm、初期値 30）と、身長の倍率（検証用、初期値 1）
-    @Published var wallRecessMM: Double = 30
-    @Published var heightScale: Double = 1
+    @Published var wallRecessMM: Double = 30 { didSet { saveTunes() } }
+    @Published var heightScale: Double = 1 { didSet { saveTunes() } }
     /// 前後位置 p：0＝手前の端、1＝折り目、1超＝床の角まで。既定 0.5
-    @Published var pPos: Double = 0.5
-    @Published var pAuto: Bool = true
-    @Published var wAuto: Bool = true
-    @Published var wLean: Double = 0
+    @Published var pPos: Double = 0.5 { didSet { saveTunes() } }
+    @Published var pAuto: Bool = true { didSet { saveTunes() } }
+    @Published var wAuto: Bool = true { didSet { saveTunes() } }
+    @Published var wLean: Double = 0 { didSet { saveTunes() } }
     /// 1€ フィルタの調整値（手順5）：最小カットオフ (Hz)、速度係数 β、先読み (ms)
-    @Published var oeMinCutoff: Double = 1.2
-    @Published var oeBeta: Double = 0.8
-    @Published var oePredMS: Double = 20
+    @Published var oeMinCutoff: Double = 1.2 { didSet { saveTunes() } }
+    @Published var oeBeta: Double = 0.8 { didSet { saveTunes() } }
+    @Published var oePredMS: Double = 20 { didSet { saveTunes() } }
+    /// 実寸計測（パネル①）のクレカの棒の長さ (pt)
+    @Published var rulerBarLength: Double = 200 { didSet { saveTunes() } }
     /// 角度ごとの p・w の記録（UserDefaults に保存）
     @Published var pwRecords: [PWRecord] = []
 
@@ -28,11 +30,54 @@ final class HologramDiagnostics: ObservableObject {
     }
 
     private static let pwKey = "hologram.pwTable.v1"
+    private static let tunesKey = "hologram.tunes.v1"
+    /// init の読み込みが終わるまで保存しない
+    private var tunesReady = false
 
     init() {
         let raw = UserDefaults.standard.array(forKey: Self.pwKey) as? [[Double]] ?? []
         pwRecords = raw.compactMap { $0.count == 3 ? PWRecord(angleDeg: $0[0], p: $0[1], w: $0[2]) : nil }
             .sorted { $0.angleDeg < $1.angleDeg }
+
+        // 無い項目・壊れた項目は、プロパティの初期値のままにする
+        let t = UserDefaults.standard.dictionary(forKey: Self.tunesKey) ?? [:]
+        func number(_ key: String) -> Double? {
+            guard let v = t[key] as? Double, v.isFinite else { return nil }
+            return v
+        }
+        if let v = number("wallRecessMM") { wallRecessMM = v }
+        if let v = number("heightScale") { heightScale = v }
+        if let v = number("pPos") { pPos = v }
+        if let v = t["pAuto"] as? Bool { pAuto = v }
+        if let v = t["wAuto"] as? Bool { wAuto = v }
+        if let v = number("wLean") { wLean = v }
+        if let v = number("oeMinCutoff") { oeMinCutoff = v }
+        if let v = number("oeBeta") { oeBeta = v }
+        if let v = number("oePredMS") { oePredMS = v }
+        if let v = number("rulerBarLength") { rulerBarLength = v }
+        if let v = t["showMarkers"] as? Bool { showMarkers = v }
+        if let v = t["showGrid"] as? Bool { showGrid = v }
+        tunesReady = true
+    }
+
+    /// 調整値をまとめて保存する（値が変わるたびに呼ばれる）
+    private func saveTunes() {
+        guard tunesReady else { return }
+        let t: [String: Any] = [
+            "wallRecessMM": wallRecessMM,
+            "heightScale": heightScale,
+            "pPos": pPos,
+            "pAuto": pAuto,
+            "wAuto": wAuto,
+            "wLean": wLean,
+            "oeMinCutoff": oeMinCutoff,
+            "oeBeta": oeBeta,
+            "oePredMS": oePredMS,
+            "rulerBarLength": rulerBarLength,
+            "showMarkers": showMarkers,
+            "showGrid": showGrid,
+        ]
+        UserDefaults.standard.set(t, forKey: Self.tunesKey)
     }
 
     /// いまの角度・p・w を記録する（同じ角度（±1°以内）の記録があれば置き換え）
@@ -53,9 +98,9 @@ final class HologramDiagnostics: ObservableObject {
         UserDefaults.standard.set(pwRecords.map { [$0.angleDeg, $0.p, $0.w] }, forKey: Self.pwKey)
     }
     /// 位置合わせマーカーの表示
-    @Published var showMarkers = false
+    @Published var showMarkers = false { didSet { saveTunes() } }
     /// 格子（床と壁）の表示
-    @Published var showGrid = true
+    @Published var showGrid = true { didSet { saveTunes() } }
     /// 機種プロファイル
     @Published var profileID = ""
     /// 読み取ったカメラ位置を含むプロファイル
@@ -76,7 +121,6 @@ struct HologramDebugPanel: View {
 
     /// クレジットカード（ISO/IEC 7810 ID-1）の長辺
     private static let cardLongSideMM: Double = 85.60
-    @State private var barLength: Double = 200
     /// 設定をコピーした時刻（「コピーしました」を少しの間出す）
     @State private var copiedAt: Date?
 
@@ -128,13 +172,14 @@ struct HologramDebugPanel: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Rectangle()
                         .fill(.yellow)
-                        .frame(width: CGFloat(barLength), height: 14, alignment: .leading)
-                    Slider(value: $barLength, in: 40...Double(max(geo.size.width, 100)))
+                        .frame(width: CGFloat(diagnostics.rulerBarLength), height: 14, alignment: .leading)
+                    // 保存した値が今の幅より長くても切り詰めないよう、上限に含める
+                    Slider(value: $diagnostics.rulerBarLength, in: 40...max(Double(geo.size.width), 100, diagnostics.rulerBarLength))
                 }
             }
             .frame(height: 56)
-            let mmPerPt = Self.cardLongSideMM / max(barLength, 1)
-            Text("棒 \(String(format: "%.1f", barLength)) pt ＝ 85.60 mm → \(String(format: "%.4f", mmPerPt)) mm/pt（\(String(format: "%.2f", 1 / mmPerPt)) pt/mm）")
+            let mmPerPt = Self.cardLongSideMM / max(diagnostics.rulerBarLength, 1)
+            Text("棒 \(String(format: "%.1f", diagnostics.rulerBarLength)) pt ＝ 85.60 mm → \(String(format: "%.4f", mmPerPt)) mm/pt（\(String(format: "%.2f", 1 / mmPerPt)) pt/mm）")
                 .font(.system(.footnote, design: .monospaced))
         }
     }
@@ -224,7 +269,8 @@ struct HologramDebugPanel: View {
             // 上限は床の角（pMax）。折り角と wallRecess で変わるので現在値を読む
             TimelineView(.periodic(from: .now, by: 0.5)) { _ in
                 let pMax = Double(diagnostics.rig?.snapshot.pMax ?? 1.6)
-                Slider(value: $diagnostics.pPos, in: 0...max(pMax, 0.01), step: 0.01)
+                // 角度で pMax が縮んでも保存した p を切り詰めないよう、上限に含める
+                Slider(value: $diagnostics.pPos, in: 0...max(pMax, 0.01, diagnostics.pPos), step: 0.01)
                     .disabled(diagnostics.pAuto)
             }
             Toggle("向き w は角度で自動（110°で 0 → 170°で 1）", isOn: $diagnostics.wAuto)
@@ -507,6 +553,7 @@ struct HologramDebugPanel: View {
         lines.append("ビルド: \(build)")
         lines.append("機種ID: \(HologramDeviceProfile.readMachineID())")
         lines.append("mm/pt: \(num(d.mmPerPt, 3))")
+        lines.append("クレカの棒: \(num(d.rulerBarLength, 1)) pt → \(num(Self.cardLongSideMM / max(d.rulerBarLength, 1), 4)) mm/pt")
         lines.append("パネル寸法: 幅 \(num(s?.panelMM?.x)) mm／上 \(num(s?.panelMM?.y)) mm／下 \(num(s?.panelMM?.z)) mm")
 
         lines.append("")
