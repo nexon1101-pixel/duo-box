@@ -94,6 +94,7 @@ struct HologramOrientationView: View {
                     Image(decorative: image, scale: 1)
                         .resizable()
                         .rotationEffect(.degrees(Double(turns) * 90))
+                        .scaleEffect(x: -1, y: 1)   // 回したあとに鏡映しにする（顔合わせの画面と同じ順番）
                 } else {
                     Color.white.opacity(0.1)
                 }
@@ -356,6 +357,9 @@ final class AxisCalibrationModel: ObservableObject {
     @Published var belowTopMM: Double
     @Published var rightMM: Double
     @Published var overlayFlip: Bool
+    /// カメラのオフセットを動かした分だけ映像をずらす量。枠は画面の同じ場所に残る
+    @Published private(set) var videoShift = CGSize.zero
+    @Published private(set) var canDecideFront = false
 
     private let machineID = HologramDeviceProfile.readMachineID()
     private var window: [CalibrationFeed.Sample] = []
@@ -364,16 +368,27 @@ final class AxisCalibrationModel: ObservableObject {
     private var baseCamera = SIMD3<Float>.zero
     private var rightMove: (axis: Int, sign: Float, camera: String)?
     private var upMove: (axis: Int, sign: Float, camera: String)?
+    /// 画面を開いたときのオフセット。枠の表示位置の基準
+    private let shiftBaseBelowMM: Double
+    private let shiftBaseRightMM: Double
+    /// 保存済みのオフセット。保存せずに進むときはここへ戻す
+    private var committedBelowMM: Double
+    private var committedRightMM: Double
+    private var upperHeightMM: Double = 0
 
     init(belowTopMM: Double, rightMM: Double) {
         self.belowTopMM = belowTopMM
         self.rightMM = rightMM
+        shiftBaseBelowMM = belowTopMM
+        shiftBaseRightMM = rightMM
+        committedBelowMM = belowTopMM
+        committedRightMM = rightMM
         overlayFlip = HologramCalibrationStore.overlayFlip(machineID: HologramDeviceProfile.readMachineID())
     }
 
     var title: String {
         switch stage {
-        case .front: return "正面：目印に目を合わせて、2秒止まってください"
+        case .front: return "端末の正面を向いたまま、ボタンで水色の点を目印に合わせて、決定してください"
         case .right: return "枠に合わせて、顔を右へ動かしてください"
         case .backFromRight, .backFromUp: return "枠に合わせて、顔を正面へ戻してください"
         case .up: return "枠に合わせて、顔を上へ動かしてください"
@@ -395,8 +410,7 @@ final class AxisCalibrationModel: ObservableObject {
 
     /// いまの段の目標（カメラから見た位置、軸対応後の座標）
     private func target(upperHeightMM: Double) -> SIMD3<Float> {
-        // 上パネル中央の正面 − カメラ位置
-        var t = SIMD3<Float>(Float(-rightMM / 1000), Float((belowTopMM - upperHeightMM / 2) / 1000), Self.frontDistance)
+        var t = Self.frontGoal(belowTopMM: belowTopMM, rightMM: rightMM, upperHeightMM: upperHeightMM)
         switch stage {
         case .right: t.x += Self.stepDistance
         case .up: t.y += Self.stepDistance
@@ -406,13 +420,86 @@ final class AxisCalibrationModel: ObservableObject {
         return t
     }
 
+    /// 基本位置：上パネル中央の正面 35cm を、カメラから見た位置にしたもの（端末座標での定義は固定）
+    private static func frontGoal(belowTopMM: Double, rightMM: Double, upperHeightMM: Double) -> SIMD3<Float> {
+        SIMD3<Float>(Float(-rightMM / 1000), Float((belowTopMM - upperHeightMM / 2) / 1000), frontDistance)
+    }
+
+    /// 軸対応が戻せない値（手動で同じ軸を選んだなど）のときは「そのまま」で出す
+    private static func unmapped(_ m: SIMD3<Float>, map: HeadTracker.AxisMap) -> SIMD3<Float>? {
+        map.inverse(m) ?? HeadTracker.AxisMap.identity.inverse(m)
+    }
+
+    private func frontPoint(belowTopMM: Double, rightMM: Double, map: HeadTracker.AxisMap,
+                            tracker: HeadTracker, extraFlip: Bool) -> CGPoint? {
+        let goal = Self.frontGoal(belowTopMM: belowTopMM, rightMM: rightMM, upperHeightMM: upperHeightMM)
+        guard let s = Self.unmapped(goal, map: map) else { return nil }
+        return tracker.projectForCalibration(s, extraFlip: extraFlip)
+    }
+
+    /// オフセットを動かすと目標が映像の上で動くので、その分を打ち消して枠を画面の同じ場所に保つ量
+    private func offsetShift(map: HeadTracker.AxisMap, tracker: HeadTracker, extraFlip: Bool) -> CGSize {
+        guard let base = frontPoint(belowTopMM: shiftBaseBelowMM, rightMM: shiftBaseRightMM,
+                                    map: map, tracker: tracker, extraFlip: extraFlip),
+              let now = frontPoint(belowTopMM: belowTopMM, rightMM: rightMM,
+                                   map: map, tracker: tracker, extraFlip: extraFlip) else { return .zero }
+        return CGSize(width: base.x - now.x, height: base.y - now.y)
+    }
+
+    private func moved(_ p: CGPoint?, by s: CGSize) -> CGPoint? {
+        p.map { CGPoint(x: $0.x + s.width, y: $0.y + s.height) }
+    }
+
+    private func updateGuide(map: HeadTracker.AxisMap, tracker: HeadTracker) {
+        videoShift = offsetShift(map: map, tracker: tracker, extraFlip: false)
+        let shift = offsetShift(map: map, tracker: tracker, extraFlip: overlayFlip)
+        guard var g = makeGuide(goal: target(upperHeightMM: upperHeightMM), map: map, tracker: tracker) else {
+            guide = nil
+            return
+        }
+        g.center = moved(g.center, by: shift) ?? g.center
+        g.leftEye = moved(g.leftEye, by: shift) ?? g.leftEye
+        g.rightEye = moved(g.rightEye, by: shift) ?? g.rightEye
+        guide = g
+    }
+
+    /// 矢印の向きへ映像と水色の点が動くように、カメラのオフセットを 0.5mm 動かす。
+    /// 向きと軸対応で画面との関係が変わるので、実際に投影して、効きが最も大きい軸を選ぶ
+    func nudgeOffset(screenRight: Double, screenDown: Double, tracker: HeadTracker) {
+        let map = tracker.axisMap
+        guard let p = frontPoint(belowTopMM: belowTopMM, rightMM: rightMM, map: map, tracker: tracker, extraFlip: false),
+              let pr = frontPoint(belowTopMM: belowTopMM, rightMM: rightMM + 1, map: map, tracker: tracker, extraFlip: false),
+              let pb = frontPoint(belowTopMM: belowTopMM + 1, rightMM: rightMM, map: map, tracker: tracker, extraFlip: false)
+        else { return }
+        // オフセットを +1mm すると目標がこれだけ動き、映像と点は目標に対して逆へ動く
+        let byRight = -(Double(pr.x - p.x) * screenRight + Double(pr.y - p.y) * screenDown)
+        let byBelow = -(Double(pb.x - p.x) * screenRight + Double(pb.y - p.y) * screenDown)
+        let step = CalibrationNudgePad.stepMM
+        if abs(byRight) >= abs(byBelow) {
+            rightMM += byRight >= 0 ? step : -step
+        } else {
+            belowTopMM = max(belowTopMM + (byBelow >= 0 ? step : -step), 0)
+        }
+        updateGuide(map: map, tracker: tracker)
+    }
+
+    var offsetChanged: Bool { belowTopMM != committedBelowMM || rightMM != committedRightMM }
+
+    /// 合った状態で決定する。オフセットを動かしていたら true（画面側が手で合わせた値として保存する）
+    func decideFront() -> Bool {
+        guard stage == .front, canDecideFront else { return false }
+        let changed = offsetChanged
+        committedBelowMM = belowTopMM
+        committedRightMM = rightMM
+        takeBase()
+        return changed
+    }
+
     private func makeGuide(goal: SIMD3<Float>, map: HeadTracker.AxisMap, tracker: HeadTracker) -> FaceGuide? {
         let half = SIMD3<Float>(Self.eyeSpacing / 2, 0, 0)
-        // 軸対応が戻せない値（手動で同じ軸を選んだなど）のときは「そのまま」で出す
-        func screen(_ m: SIMD3<Float>) -> SIMD3<Float>? { map.inverse(m) ?? HeadTracker.AxisMap.identity.inverse(m) }
-        guard let ls = screen(goal - half), let rs = screen(goal + half),
-              var l = tracker.projectForCalibration(ls, flip: overlayFlip),
-              var r = tracker.projectForCalibration(rs, flip: overlayFlip) else { return nil }
+        guard let ls = Self.unmapped(goal - half, map: map), let rs = Self.unmapped(goal + half, map: map),
+              var l = tracker.projectForCalibration(ls, extraFlip: overlayFlip),
+              var r = tracker.projectForCalibration(rs, extraFlip: overlayFlip) else { return nil }
         // 鏡写しでは左右が入れ替わるので、画面の左にある方を左の目印にする
         if l.x > r.x { swap(&l, &r) }
         let spacing = hypot(r.x - l.x, r.y - l.y)
@@ -428,21 +515,24 @@ final class AxisCalibrationModel: ObservableObject {
 
     func tick(sample: CalibrationFeed.Sample?, tracker: HeadTracker, upperHeightMM: Double) {
         let map = tracker.axisMap
+        self.upperHeightMM = upperHeightMM
         let goal = target(upperHeightMM: upperHeightMM)
-        guide = makeGuide(goal: goal, map: map, tracker: tracker)
+        updateGuide(map: map, tracker: tracker)
+        let overlayShift = offsetShift(map: map, tracker: tracker, extraFlip: overlayFlip)
 
         guard let sample else {
             detectedLeft = nil
             detectedRight = nil
             frameState = .noFace
             canUseAsBase = false
+            canDecideFront = false
             matchedSince = nil
             window.removeAll()
             instruction = "枠の中に顔を入れてください"
             return
         }
-        let left = tracker.projectForCalibration(sample.leftEye, flip: overlayFlip)
-        let right = tracker.projectForCalibration(sample.rightEye, flip: overlayFlip)
+        let left = moved(tracker.projectForCalibration(sample.leftEye, extraFlip: overlayFlip), by: overlayShift)
+        let right = moved(tracker.projectForCalibration(sample.rightEye, extraFlip: overlayFlip), by: overlayShift)
         detectedLeft = left
         detectedRight = right
 
@@ -470,8 +560,11 @@ final class AxisCalibrationModel: ObservableObject {
             instruction = "顔をまっすぐにしてください"
         } else if matched {
             instruction = stage == .verify ? "合っています" : "そのまま止まってください"
+        } else if stage == .front, abs(diff.z) <= Self.matchDistance {
+            instruction = "顔は動かさず、ボタンで合わせてください"
         } else {
-            instruction = Self.guidance(diff)
+            instruction = Self.guidance(mirrorGuidanceDelta(aim: isReturn ? baseScreen : Self.unmapped(goal, map: map),
+                                                            current: sample.screen, fallback: diff, tracker: tracker))
         }
 
         window.append(sample)
@@ -491,7 +584,7 @@ final class AxisCalibrationModel: ObservableObject {
         switch stage {
         case .front:
             canUseAsBase = still && Self.frontRange.contains(mean.z)
-            if heldOnTarget && canUseAsBase { recordBase() }
+            canDecideFront = heldOnTarget && canUseAsBase
         case .right, .up, .near:
             canUseAsBase = false
             let delta = mean - baseScreen
@@ -506,9 +599,30 @@ final class AxisCalibrationModel: ObservableObject {
         }
     }
 
-    /// 「このまま基準にする」：軸がまだ違うと正面の目印に合わせられないので、距離が合って止まっていれば進める
+    /// 鏡映しの画面の上で、目標と今の位置の差を取る（x 右、y 上、z 距離、単位 m）。
+    /// 画面で右にある目標へは、体を右へ動かせば近づく
+    private func mirrorGuidanceDelta(aim: SIMD3<Float>?, current: SIMD3<Float>, fallback: SIMD3<Float>,
+                                     tracker: HeadTracker) -> SIMD3<Float> {
+        guard let aim, let g = guide,
+              let a = tracker.projectForCalibration(aim),
+              let c = tracker.projectForCalibration(current) else { return fallback }
+        let spacing = hypot(g.rightEye.x - g.leftEye.x, g.rightEye.y - g.leftEye.y)
+        guard spacing > 1 else { return fallback }
+        let metersPerPt = CGFloat(Self.eyeSpacing) / spacing
+        return SIMD3<Float>(Float((a.x - c.x) * metersPerPt), Float((c.y - a.y) * metersPerPt), fallback.z)
+    }
+
+    /// 「保存せず基準にする」：軸がまだ違うと正面の目印に合わせられないので、距離が合って止まっていれば進める。
+    /// 動かしたオフセットは保存した値へ戻す
     func recordBase() {
         guard stage == .front, !window.isEmpty else { return }
+        belowTopMM = committedBelowMM
+        rightMM = committedRightMM
+        takeBase()
+    }
+
+    private func takeBase() {
+        guard !window.isEmpty else { return }
         baseScreen = window.reduce(SIMD3<Float>.zero) { $0 + $1.screen } / Float(window.count)
         baseCamera = window.reduce(SIMD3<Float>.zero) { $0 + $1.camera } / Float(window.count)
         message = ""
@@ -581,6 +695,7 @@ final class AxisCalibrationModel: ObservableObject {
         matchedSince = nil
         frameState = .off
         canUseAsBase = false
+        canDecideFront = false
     }
 
     private static func dominantAxis(_ v: SIMD3<Float>) -> Int {
@@ -669,6 +784,7 @@ struct HologramAxisCalibrationView: View {
                 Image(decorative: image, scale: 1)
                     .resizable()
                     .frame(width: size.width, height: size.height)
+                    .offset(model.videoShift)
             }
             if let g = model.guide {
                 faceGuide(g, size: size)
@@ -781,9 +897,29 @@ struct HologramAxisCalibrationView: View {
                 if let result = model.resultText {
                     Text(result).font(.system(.footnote, design: .monospaced)).multilineTextAlignment(.center)
                 }
+                if model.stage == .front {
+                    Text("端末の正面を向いているのに目が目印に合わないときは、カメラ位置のずれです。顔は動かさず、そのまま正面を向いて、矢印で映像と水色の点を目印へ動かしてください")
+                        .font(.footnote)
+                        .multilineTextAlignment(.center)
+                    if !diagnostics.isCalibrated {
+                        Text("軸の計測がまだのときは、矢印の値が正しくならないことがあります。合わないときは「保存せず基準にする」で先へ進んでください")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .multilineTextAlignment(.center)
+                    }
+                    Text(HologramDeviceProfile.cameraPositionText(belowTopMM: model.belowTopMM, rightMM: model.rightMM))
+                        .font(.system(.caption, design: .monospaced))
+                        .multilineTextAlignment(.center)
+                    CalibrationNudgePad { right, down in
+                        model.nudgeOffset(screenRight: right, screenDown: down, tracker: tracker)
+                    }
+                    Button("決定", action: decideFront)
+                        .bold()
+                        .disabled(!model.canDecideFront)
+                }
                 HStack(spacing: 18) {
                     if model.stage == .front {
-                        Button("このまま基準にする") { model.recordBase() }
+                        Button("保存せず基準にする") { model.recordBase() }
                             .disabled(!model.canUseAsBase)
                     }
                     Button("最初から") { model.restart() }
@@ -799,15 +935,8 @@ struct HologramAxisCalibrationView: View {
                         Text(HologramDeviceProfile.cameraPositionText(belowTopMM: model.belowTopMM, rightMM: model.rightMM))
                             .font(.system(.caption, design: .monospaced))
                             .multilineTextAlignment(.center)
-                        CalibrationNudgePad { right, down in
-                            model.rightMM += right
-                            model.belowTopMM = max(model.belowTopMM + down, 0)
-                        }
-                        HStack(spacing: 14) {
-                            Button("カメラ位置を決定") {
-                                diagnostics.saveManualCamera(belowTopMM: model.belowTopMM, rightMM: model.rightMM)
-                            }
-                            Button("点の左右を反転") { model.setFlip(!model.overlayFlip) }
+                        Button("点だけ追加で左右反転（鏡映しの上から）：\(model.overlayFlip ? "オン" : "オフ")") {
+                            model.setFlip(!model.overlayFlip)
                         }
                         .font(.caption)
                     }
@@ -817,5 +946,10 @@ struct HologramAxisCalibrationView: View {
             }
             .padding(12)
         }
+    }
+
+    private func decideFront() {
+        guard model.decideFront() else { return }
+        diagnostics.saveManualCamera(belowTopMM: model.belowTopMM, rightMM: model.rightMM)
     }
 }

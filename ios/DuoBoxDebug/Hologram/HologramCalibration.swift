@@ -75,7 +75,7 @@ enum HologramCalibrationStore {
         }
     }
 
-    /// 映像と点の左右が合わないときの反転
+    /// 開発用：鏡映しの映像の上で、点だけをさらに左右反転する
     static func overlayFlip(machineID: String) -> Bool {
         dictionary(machineID)["overlayFlip"] as? Bool ?? false
     }

@@ -188,7 +188,8 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     /// 正規化画像（左上原点）→ 表示するビューの pt（左上原点）。
-    /// 順番は 鏡写し → 選んだ向きの回転（時計回り）→ 点だけの左右反転（flip）
+    /// 順番は 向きの基準の反転（mirror）→ 選んだ向きの回転（時計回り）→ 表示の鏡映し（flip）。
+    /// flip は回転のあとに掛けるので、あごの上下と保存済みの向き（videoTurns）は変わらない
     private static func imageToView(_ display: CGAffineTransform, viewport vp: CGSize,
                                     turns: Int, mirror: Bool, flip: Bool = false) -> CGAffineTransform {
         let base = baseSize(vp, turns: turns)
@@ -212,8 +213,9 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         return CGPoint(x: p.x / imageSize.width, y: p.y / imageSize.height)
     }
 
-    /// 画面座標（x 右、y 上、z は距離）の点を、表示中の映像の上の位置へ直す。映像と同じ変換を通す
-    func projectForCalibration(_ s: SIMD3<Float>, flip: Bool) -> CGPoint? {
+    /// 画面座標（x 右、y 上、z は距離）の点を、鏡映しで表示中の映像の上の位置へ直す。映像と同じ変換を通す。
+    /// extraFlip は開発用：鏡映しの上から、点だけをさらに左右反転する
+    func projectForCalibration(_ s: SIMD3<Float>, extraFlip: Bool = false) -> CGPoint? {
         lock.lock()
         let storedCamera = calibrationCamera, o = calibrationOrientation, vp = calibrationViewport
         let mirror = calibrationMirror, shownTurns = calibrationShownTurns, turns = lockedVideoTurns
@@ -224,7 +226,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         let g1 = Self.turnCoordinates(s, turns: (4 - turns) % 4, mirrored: mirror)
         let world = simd_mul(simd_inverse(camera.viewMatrix(for: o)), SIMD4<Float>(g1.x, g1.y, -g1.z, 1))
         guard let n = Self.normalizedImagePoint(SIMD3<Float>(world.x, world.y, world.z), camera: camera, imageSize: imageSize) else { return nil }
-        let p = n.applying(Self.imageToView(display, viewport: vp, turns: shownTurns, mirror: mirror, flip: flip))
+        let p = n.applying(Self.imageToView(display, viewport: vp, turns: shownTurns, mirror: mirror, flip: !extraFlip))
         guard p.x.isFinite, p.y.isFinite else { return nil }
         return p
     }
@@ -236,7 +238,8 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         lock.lock()
         let vp = calibrationViewport
         guard let feed = calibrationFeed, vp.width > 0, vp.height > 0 else { lock.unlock(); return }
-        let turns = calibrationUnrotated ? 0 : lockedVideoTurns
+        let unrotated = calibrationUnrotated
+        let turns = unrotated ? 0 : lockedVideoTurns
         lock.unlock()
         let t = frame.displayTransform(for: o, viewportSize: Self.baseSize(vp, turns: turns))
         let mirror = Self.needsMirror(t)
@@ -259,7 +262,8 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
             let toNormalized = CGAffineTransform(a: 1 / w, b: 0, c: 0, d: -1 / h, tx: 0, ty: 1)
             let toOutput = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: vp.height)
             let m = toNormalized
-                .concatenating(Self.imageToView(t, viewport: vp, turns: turns, mirror: mirror))
+                // 向きを選ぶ段は、ビュー側で回したあとに鏡映しにする
+                .concatenating(Self.imageToView(t, viewport: vp, turns: turns, mirror: mirror, flip: !unrotated))
                 .concatenating(toOutput)
             let rect = CGRect(origin: .zero, size: vp)
             let image = CIImage(cvPixelBuffer: buffer).transformed(by: m).cropped(to: rect)
