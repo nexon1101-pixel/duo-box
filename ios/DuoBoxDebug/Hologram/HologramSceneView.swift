@@ -237,6 +237,8 @@ final class HologramRig {
     }
 
     private var eyeFilter = OneEuro3()
+    /// フィルタを最後に進めた測定（ARFrame）の時刻。同じ測定ではフィルタを進めない
+    private var lastFilteredFrameTime: TimeInterval?
     private var smoothedAngle: Float = .pi     // 全開 180° から始める
     /// ヒンジ軸から上下パネルの折り目側の端までの距離 G/2（m）。update の頭で折り角から決める
     private var foldHalfGap: Float = 0
@@ -462,12 +464,16 @@ final class HologramRig {
                                     angleDeg: Float, p: Float, w: Float) -> Float {
         // Int32 への変換は NaN や範囲外で落ちるので、必ず有限・範囲内にしてから変換する
         func qi(_ v: Float) -> Int32 { v.isFinite ? Int32(min(max(v.rounded(), -1e9), 1e9)) : 0 }
-        let q = (eye / 0.002).rounded(.toNearestOrAwayFromZero)
+        // いまの目の位置は使わず、基準の目の位置で決める。目の位置を入れると、頭が 2mm 動くたびに
+        // 約 4,000 回の計算をやり直し、そのコマの描画が遅れて引っかかる（実機の録画で約 0.3 秒ごとに見えた）。
+        // 目が動く範囲は fittedHeight の中の「目の箱」で見ているので、見切れの判定はこれで足りる
+        let fixedEye = nominalEye
+        let q = (fixedEye / 0.002).rounded(.toNearestOrAwayFromZero)
         let key = FitKey(angle: qi(angleDeg * 10), p: qi(p * 200), w: qi(w * 200),
                          width: width, upperH: upperH, lowerH: lowerH,
                          eye: SIMD3<Int32>(qi(q.x), qi(q.y), qi(q.z)))
         if key == lastFitKey { return lastFitRaw }
-        let raw = fittedHeight(stand: S, up: u, d: d, n: n, eye: q * 0.002)
+        let raw = fittedHeight(stand: S, up: u, d: d, n: n, eye: fixedEye)
         lastFitKey = key
         lastFitRaw = raw
         return raw
@@ -1017,8 +1023,27 @@ final class HologramRig {
         lastValidTarget = target
         setLatencyFrame(usedFrameTime)
         // 平滑化は 1€ フィルタ（手順5）。さらに速度×先読み時間だけ先の位置を出して表示までの遅れを埋める
-        let filtered = eyeFilter.filter(target, dt: Float(dt), minCutoff: oeMinCutoff, beta: oeBeta, dCutoff: 1.0)
-        let predictionSeconds = oePred
+        // カメラの目の位置は描画より遅い間隔でしか更新されない。描画ごとに同じ値でフィルタを回すと、
+        // 速さの見積もりが 0 と倍の値を行き来して先読みが跳ねる（実機の録画で、1〜2 コマの揺れ戻しとして見えた）。
+        // そこで、新しい測定が来たときだけ、測定の時刻の差でフィルタを進める。
+        // 描画のたびには、測ってから今までの時間ぶんを速さで先へ延ばし、なめらかに動かす
+        let filtered: SIMD3<Float>
+        var predictionSeconds = oePred
+        if let frameTime = usedFrameTime {
+            if frameTime != lastFilteredFrameTime {
+                let sampleDT = lastFilteredFrameTime.map { Float(min(max(frameTime - $0, 0.001), 0.1)) } ?? Float(dt)
+                lastFilteredFrameTime = frameTime
+                filtered = eyeFilter.filter(target, dt: sampleDT, minCutoff: oeMinCutoff, beta: oeBeta, dCutoff: 1.0)
+            } else {
+                filtered = eyeFilter.xHat
+            }
+            let age = Float(min(max(CACurrentMediaTime() - frameTime, 0), 0.1))
+            predictionSeconds += age
+        } else {
+            // 顔が見えないとき（保持・ドラッグ）は、描画ごとに進める
+            lastFilteredFrameTime = nil
+            filtered = eyeFilter.filter(target, dt: Float(dt), minCutoff: oeMinCutoff, beta: oeBeta, dCutoff: 1.0)
+        }
         let predicted = filtered + Self.clampedLead(eyeFilter.dxHat * predictionSeconds, seconds: predictionSeconds)
         let eye = SIMD3<Float>(predicted.x, predicted.y, max(predicted.z, 0.1))
 

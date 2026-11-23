@@ -114,6 +114,15 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     static let closedBlink: Float = 0.6   // これより大きければ閉じている
     static let openBlink: Float = 0.35    // これより小さければ開いている
     private var _useOpenEye = true
+    /// 片目の切り替え：同じ状態がこの秒数続いたら切り替え、この秒数かけて目の位置を移す
+    static let eyeSwitchHold: TimeInterval = 0.25
+    static let eyeSwitchBlend: Float = 0.3
+    // ARSession の delegate のキューでだけ触る
+    private var eyeWantCandidate: Float = 0.5
+    private var eyeWantSince: TimeInterval = 0
+    private var eyeWantStable: Float = 0.5
+    private var eyeWeightL: Float = 0.5
+    private var eyeWeightTime: TimeInterval?
     var useOpenEye: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _useOpenEye }
         set { lock.lock(); _useOpenEye = newValue; lock.unlock() }
@@ -428,15 +437,24 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         let rightEye = simd_mul(face.transform, face.rightEyeTransform).columns.3
         let blinkL = face.blendShapes[.eyeBlinkLeft]?.floatValue ?? 0
         let blinkR = face.blendShapes[.eyeBlinkRight]?.floatValue ?? 0
-        let eyeMid: SIMD4<Float>
+        // 目を細めたときに中点と片目を行き来しないよう、同じ状態が 0.25 秒続いてから切り替え、
+        // 切り替えのあとも 0.3 秒かけて目の位置を移す（約 3cm の跳びをなくす）
+        var want: Float = 0.5                       // 左目の重み。0.5＝中点、1＝左目だけ、0＝右目だけ
+        if useOpenEye && blinkL > Self.closedBlink && blinkR < Self.openBlink { want = 0 }
+        else if useOpenEye && blinkR > Self.closedBlink && blinkL < Self.openBlink { want = 1 }
+        let now = frame.timestamp
+        if want != eyeWantCandidate { eyeWantCandidate = want; eyeWantSince = now }
+        if now - eyeWantSince >= Self.eyeSwitchHold { eyeWantStable = want }
+        let stepDT = Float(min(max(now - (eyeWeightTime ?? now), 0), 0.1))
+        eyeWeightTime = now
+        let maxStep = stepDT / Self.eyeSwitchBlend * 0.5
+        eyeWeightL += min(max(eyeWantStable - eyeWeightL, -maxStep), maxStep)
+        let eyeMid = leftEye * eyeWeightL + rightEye * (1 - eyeWeightL)
         let usedEye: String
-        if useOpenEye && blinkL > Self.closedBlink && blinkR < Self.openBlink {
-            eyeMid = rightEye; usedEye = "右目（左目を閉じている）"
-        } else if useOpenEye && blinkR > Self.closedBlink && blinkL < Self.openBlink {
-            eyeMid = leftEye; usedEye = "左目（右目を閉じている）"
-        } else {
-            eyeMid = (leftEye + rightEye) * 0.5; usedEye = "両目の中点"
-        }
+        if eyeWeightL > 0.95 { usedEye = "左目（右目を閉じている）" }
+        else if eyeWeightL < 0.05 { usedEye = "右目（左目を閉じている）" }
+        else if abs(eyeWeightL - 0.5) < 0.05 { usedEye = "両目の中点" }
+        else { usedEye = "切り替え中" }
         updateDiag { $0.usedEye = usedEye }
         // カメラ座標へ直す（カメラは端末と一緒に動くので、カメラから見た相対位置を取る）
         let rel = simd_mul(simd_inverse(frame.camera.transform), eyeMid)
