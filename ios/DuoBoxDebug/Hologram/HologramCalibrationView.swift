@@ -29,8 +29,92 @@ struct CalibrationNudgePad: View {
     }
 }
 
+/// キャリブレーションの最初の段：映像を 0°・90°・180°・270° 回して並べ、顔がまっすぐなものを選ぶ。
+struct HologramOrientationView: View {
+    @ObservedObject var tracker: HeadTracker
+    @ObservedObject var diagnostics: HologramDiagnostics
+    var onDecide: () -> Void
+    var onCancel: () -> Void
+
+    /// 見本1枚の元の映像の大きさ（正方形なので、回しても切れ方が変わらない）
+    private static let sourceSize = CGSize(width: 240, height: 240)
+
+    @StateObject private var feed = CalibrationFeed()
+    @State private var selected: Int?
+
+    var body: some View {
+        GeometryReader { geo in
+            let profileFold = diagnostics.cameraProfile.foldYPt
+            let fold = profileFold > 0 ? profileFold : geo.size.height / 2
+            let spacing: CGFloat = 8
+            let tile = max(min((geo.size.width - spacing * 5) / 4, fold - 24), 40)
+            let current = selected ?? tracker.videoTurns
+            ZStack(alignment: .topLeading) {
+                Color.black
+                HStack(spacing: spacing) {
+                    ForEach(0..<4, id: \.self) { turns in
+                        Button { selected = turns } label: { preview(turns: turns, size: tile, isSelected: current == turns) }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("\(turns * 90)度")
+                            .accessibilityAddTraits(current == turns ? .isSelected : [])
+                    }
+                }
+                .frame(width: geo.size.width, height: fold)
+
+                ScrollView {
+                    VStack(spacing: 12) {
+                        Text("顔がまっすぐ（あごが下）に映っているものを選んでください")
+                            .font(.headline)
+                            .multilineTextAlignment(.center)
+                        HStack(spacing: 24) {
+                            Button("やめる", action: onCancel)
+                            Button("決定") {
+                                diagnostics.chooseVideoTurns(current, tracker: tracker)
+                                onDecide()
+                            }
+                            .bold()
+                        }
+                    }
+                    .padding(14)
+                }
+                .frame(width: geo.size.width, height: max(geo.size.height - fold, 0))
+                .offset(y: fold)
+            }
+        }
+        .ignoresSafeArea()
+        .foregroundStyle(.white)
+        .onAppear { tracker.setCalibrationFeed(feed, viewport: Self.sourceSize, unrotated: true) }
+        .onDisappear { tracker.setCalibrationFeed(nil, viewport: .zero) }
+    }
+
+    private func preview(turns: Int, size: CGFloat, isSelected: Bool) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            Group {
+                if let image = feed.image {
+                    Image(decorative: image, scale: 1)
+                        .resizable()
+                        .rotationEffect(.degrees(Double(turns) * 90))
+                } else {
+                    Color.white.opacity(0.1)
+                }
+            }
+            .frame(width: size, height: size)
+            .clipped()
+            Text("\(turns * 90)°")
+                .font(.caption.bold())
+                .padding(.horizontal, 5)
+                .background(.black.opacity(0.6), in: Capsule())
+                .padding(4)
+        }
+        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(isSelected ? Color.yellow : Color.white.opacity(0.25),
+                                                                lineWidth: isSelected ? 3 : 1))
+    }
+}
+
 /// G2：アプリが思っているカメラの位置に輪を出し、実物のカメラの点へ合わせる画面。
+/// ARKit は動かしたままにして、システムのカメラの印（黒い楕円）を目印にする。
 struct HologramCameraAlignView: View {
+    @ObservedObject var tracker: HeadTracker
     @ObservedObject var diagnostics: HologramDiagnostics
     /// 決定したあとに呼ぶ
     var onDecide: () -> Void
@@ -53,7 +137,8 @@ struct HologramCameraAlignView: View {
                 Color.black
 
                 // 上パネル全体をドラッグの受け口にする（指で輪を隠さないため、動かした分だけ輪が動く）
-                Color.clear
+                // 黒い楕円が見えるよう、上パネルは灰色にする
+                Color(white: 0.45)
                     .contentShape(Rectangle())
                     .frame(width: geo.size.width, height: fold)
                     .gesture(dragGesture(width: geo.size.width, fold: fold))
@@ -72,13 +157,16 @@ struct HologramCameraAlignView: View {
         }
         .ignoresSafeArea()
         .foregroundStyle(.white)
-        .onAppear(perform: loadCurrent)
+        .onAppear {
+            tracker.start()   // 動いていれば何もしない
+            loadCurrent()
+        }
     }
 
     private var controls: some View {
         ScrollView {
             VStack(spacing: 10) {
-                Text("画面を斜めから見ると、カメラの点が見えます。輪をその点に合わせてください")
+                Text("黄色い輪の中心を、カメラの位置（左端に出ている黒い楕円の中心）に合わせて、決定を押してください")
                     .font(.headline)
                     .multilineTextAlignment(.center)
                 Text(HologramDeviceProfile.cameraPositionText(belowTopMM: belowTopMM, rightMM: rightMM))
@@ -145,19 +233,23 @@ struct HologramCameraAlignView: View {
     }
 }
 
-/// G2 → G3 を通しで進める画面。
+/// 向き → G2 → G3 → G4 を通しで進める画面。
 struct HologramCalibrationFlow: View {
     @ObservedObject var tracker: HeadTracker
     @ObservedObject var diagnostics: HologramDiagnostics
     var onClose: () -> Void
 
-    private enum Step { case camera, axis, box }
-    @State private var step = Step.camera
+    private enum Step { case orientation, camera, axis, box }
+    @State private var step = Step.orientation
 
     var body: some View {
         switch step {
+        case .orientation:
+            HologramOrientationView(tracker: tracker, diagnostics: diagnostics,
+                                    onDecide: { step = .camera },
+                                    onCancel: onClose)
         case .camera:
-            HologramCameraAlignView(diagnostics: diagnostics,
+            HologramCameraAlignView(tracker: tracker, diagnostics: diagnostics,
                                     onDecide: { step = .axis },
                                     onCancel: onClose)
         case .axis:
@@ -669,7 +761,7 @@ struct HologramAxisCalibrationView: View {
         TimelineView(.periodic(from: .now, by: 0.5)) { _ in
             let d = tracker.diagnosticsSnapshot()
             let tracked = d.lastFaceTracked.map { $0 ? "true" : "false" } ?? "顔アンカーなし"
-            Text("追跡 \(d.cameraState)\nアンカー \(d.lastAnchorCount)（顔 \(d.lastFaceAnchorCount)）\nisTracked \(tracked)\n映像の180°補正 \(tracker.calibrationVideoRotated ? "あり" : "なし")")
+            Text("追跡 \(d.cameraState)\nアンカー \(d.lastAnchorCount)（顔 \(d.lastFaceAnchorCount)）\nisTracked \(tracked)\n映像の向き \(tracker.videoTurns * 90)°")
                 .font(.system(size: 9, design: .monospaced))
                 .multilineTextAlignment(.trailing)
                 .padding(4)

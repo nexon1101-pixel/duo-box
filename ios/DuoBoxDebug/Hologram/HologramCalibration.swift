@@ -56,6 +56,25 @@ enum HologramCalibrationStore {
         update(machineID) { $0["boxCheck"] = v }
     }
 
+    /// 選んだ映像の向き（時計回りの 90° の数、0〜3）。無い・壊れているときは 0
+    static func videoTurns(machineID: String) -> Int {
+        guard let v = dictionary(machineID)["videoTurns"] as? Int, (0...3).contains(v) else { return 0 }
+        return v
+    }
+
+    static func saveVideoTurns(_ turns: Int, machineID: String) {
+        update(machineID) { $0["videoTurns"] = turns }
+    }
+
+    /// 向きが変わって無効になった計測結果を消す（カメラ位置と点の反転は残す）
+    static func clearMeasured(machineID: String) {
+        update(machineID) {
+            $0.removeValue(forKey: "calibrated")
+            $0.removeValue(forKey: "resultText")
+            $0.removeValue(forKey: "boxCheck")
+        }
+    }
+
     /// 映像と点の左右が合わないときの反転
     static func overlayFlip(machineID: String) -> Bool {
         dictionary(machineID)["overlayFlip"] as? Bool ?? false

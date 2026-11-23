@@ -133,6 +133,14 @@ final class HologramDiagnostics: ObservableObject {
         showGrid = true
     }
 
+    /// 映像の向きを決める。向きが変わったら前の軸対応の結果は無効なので、表示も未実施へ戻す
+    func chooseVideoTurns(_ turns: Int, tracker: HeadTracker) {
+        guard tracker.setVideoTurns(turns) else { return }
+        isCalibrated = false
+        calibrationResult = nil
+        boxCheck = nil
+    }
+
     /// 手で合わせたカメラ位置を機種IDごとに保存し、すぐ反映する
     func saveManualCamera(belowTopMM: Double, rightMM: Double) {
         HologramCalibrationStore.saveManualCamera(.init(belowTopMM: belowTopMM, rightMM: rightMM),
@@ -286,6 +294,7 @@ struct HologramDebugPanel: View {
         if let below = p.occlusionBelowTopMM, let right = p.occlusionRightMM {
             row("occlusion の位置", HologramDeviceProfile.cameraPositionText(belowTopMM: below, rightMM: right))
         }
+        row("選んだ映像の向き", "\(tracker.videoTurns * 90)°")
         row("軸対応の結果", diagnostics.calibrationResult ?? "キャリブレーション未実施")
         row("箱の確認", diagnostics.boxCheck.map { $0 ? "はい（奥に止まって見える）" : "いいえ（G2・G3 をやり直す）" } ?? "未回答")
         row("occlusion 変換前 frame（使用）", p.occlusionRawFrame.map(frameText) ?? "なし")
@@ -696,6 +705,7 @@ struct HologramDebugPanel: View {
         if camera.cameraSource == .lowerPanel, let c = camera.cameraCenterPt {
             lines.append("読み取った中心（未使用）: x \(num(Double(c.x), 2)) y \(num(Double(c.y), 2)) pt")
         }
+        lines.append("選んだ映像の向き: \(tracker.videoTurns * 90)°")
         lines.append("軸対応: x=\(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: tracker.axisMap.xAxis, sign: tracker.axisMap.xSign)]) y=\(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: tracker.axisMap.yAxis, sign: tracker.axisMap.ySign)])")
         lines.append("キャリブレーション: \((d.calibrationResult ?? "未実施").replacingOccurrences(of: "\n", with: "／"))")
         lines.append("箱の確認: \(d.boxCheck.map { $0 ? "はい" : "いいえ" } ?? "未回答")")
