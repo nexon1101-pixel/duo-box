@@ -135,7 +135,7 @@ final class HologramDiagnostics: ObservableObject {
     /// G4 の箱の確認の答え（未回答は nil）
     @Published var boxCheck = HologramCalibrationStore.boxCheck(machineID: HologramDeviceProfile.readMachineID())
 
-    /// 調整値を既定に戻す。軸対応・カメラ位置・距離の倍率・角度ごとの記録・クレカの棒（実測値）は消さない
+    /// 調整値を既定に戻す（距離の倍率も 1.00 へ）。軸対応・カメラ位置・角度ごとの記録・クレカの棒（実測値）は消さない
     func resetTunes() {
         wallRecessMM = 30
         heightScale = 1
@@ -146,6 +146,7 @@ final class HologramDiagnostics: ObservableObject {
         oeMinCutoff = 1.2
         oeBeta = 0.8
         oePredMS = 20
+        distanceScale = 1
         showMarkers = false
         showGrid = true
     }
@@ -179,6 +180,9 @@ struct HologramDebugPanel: View {
     @ObservedObject var diagnostics: HologramDiagnostics
     var onCalibrate: () -> Void
     var onCompare: () -> Void
+    /// L 字の確認の箱が開いているか、と開閉
+    var isLBoxOpen: Bool
+    var onToggleLBox: () -> Void
     var onClose: () -> Void
 
     /// クレジットカード（ISO/IEC 7810 ID-1）の長辺
@@ -201,6 +205,8 @@ struct HologramDebugPanel: View {
                 }
                 Button("キャリブレーション", action: onCalibrate)
                     .buttonStyle(.borderedProminent)
+                Button(isLBoxOpen ? "L字の確認の箱を閉じる" : "L字の確認の箱を開く", action: onToggleLBox)
+                    .buttonStyle(.bordered)
                 Button("調整値を既定に戻す") { confirmReset = true }
                     .font(.caption)
                 distanceSection
@@ -233,7 +239,7 @@ struct HologramDebugPanel: View {
             Button("戻す", role: .destructive) { diagnostics.resetTunes() }
             Button("やめる", role: .cancel) {}
         } message: {
-            Text("壁の下げ量 30mm、p・w 自動（p の既定 1.0）、身長 ×1.0、先読み 20ms などに戻します。キャリブレーションの結果、距離の倍率、角度ごとの記録、クレカの棒は消えません")
+            Text("壁の下げ量 30mm、p・w 自動（p の既定 1.0）、身長 ×1.0、距離の倍率 ×1.00、先読み 20ms などに戻します。キャリブレーションの結果、角度ごとの記録、クレカの棒は消えません")
         }
         .foregroundStyle(.white)
         .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
@@ -260,10 +266,6 @@ struct HologramDebugPanel: View {
                 }
                 .font(.system(.footnote, design: .monospaced))
             }
-            Text("距離の倍率: ×\(String(format: "%.2f", diagnostics.distanceScale))（機種ごとに保存）")
-                .font(.caption)
-            Slider(value: $diagnostics.distanceScale, in: HologramCalibrationStore.distanceScaleRange,
-                   step: HologramCalibrationStore.distanceScaleStep)
             Button("本物の物と比べる", action: onCompare)
                 .font(.caption)
             Text("遅れは ARKit のフレームの時刻から描画の命令を出し終えるまで。画面に光るまでの時間は含まない")
@@ -521,6 +523,11 @@ struct HologramDebugPanel: View {
         let p = diagnostics.cameraProfile
         return VStack(alignment: .leading, spacing: 8) {
             Text("開発用").font(.subheadline.bold())
+            Text("距離の倍率: ×\(String(format: "%.2f", diagnostics.distanceScale))（機種ごとに保存）")
+                .font(.caption)
+            Slider(value: $diagnostics.distanceScale, in: HologramCalibrationStore.distanceScaleRange,
+                   step: HologramCalibrationStore.distanceScaleStep)
+            Divider()
             Text("軸対応（手動）").font(.caption.bold())
             Text("画面の右＝ \(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: m.xAxis, sign: m.xSign)])　画面の上＝ \(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: m.yAxis, sign: m.ySign)])（画面座標の軸）")
                 .font(.system(.footnote, design: .monospaced))

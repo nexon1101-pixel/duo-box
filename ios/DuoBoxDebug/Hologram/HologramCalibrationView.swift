@@ -265,7 +265,7 @@ struct HologramCalibrationFlow: View {
     }
 }
 
-/// G4：画面の奥 30mm の格子の箱で、最後の確認をする。上パネルは絵を見せるため何も重ねない。
+/// G4：画面の奥 30mm の L 字の格子の箱で、最後の確認をする。上パネルは絵を見せるため何も重ねない。
 struct HologramBoxCheckView: View {
     @ObservedObject var diagnostics: HologramDiagnostics
     var onRetry: () -> Void
@@ -318,7 +318,42 @@ struct HologramBoxCheckView: View {
     }
 }
 
-/// 本物の物と仮想の棒を比べて、距離の倍率と先読みを合わせる場面。
+/// 計測パネルから開く L 字の確認の箱。箱を隠さないよう、下パネルの下側にヒンジ角と閉じるボタンだけを出す
+struct HologramLBoxView: View {
+    @ObservedObject var hinge: HingeMonitor
+    @ObservedObject var diagnostics: HologramDiagnostics
+    var onClose: () -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            let profileFold = diagnostics.cameraProfile.foldYPt
+            let fold = profileFold > 0 ? profileFold : geo.size.height / 2
+            HStack(spacing: 20) {
+                VStack(spacing: 0) {
+                    Text("ヒンジ角").font(.caption)
+                    Text(hinge.angleDegrees.map { "\(Int($0.rounded()))°" } ?? "取得なし")
+                        .font(.system(size: 56, weight: .bold, design: .monospaced))
+                        .minimumScaleFactor(0.5)
+                        .lineLimit(1)
+                }
+                Button("箱を閉じる", action: onClose)
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.bottom, 12)
+            .frame(width: geo.size.width, height: max(geo.size.height - fold, 0), alignment: .bottom)
+            .offset(y: fold)
+        }
+        .ignoresSafeArea()
+        .foregroundStyle(.white)
+        .onAppear { diagnostics.rig?.setLBoxMode(true) }
+        .onDisappear { diagnostics.rig?.setLBoxMode(false) }
+    }
+}
+
+/// 本物の物と仮想の棒を横に並べて、先読みを合わせる場面。
 /// 十字と棒を隠さないよう、操作は上パネルの上側だけに置く。決定するまで保存しない
 struct HologramCompareView: View {
     @ObservedObject var tracker: HeadTracker
@@ -327,7 +362,6 @@ struct HologramCompareView: View {
 
     private static let predictionButtonStepMS: Double = 5
     @State private var rodCM: Double = 4
-    @State private var scale: Double = 1
     @State private var predictionMS: Double = 20
 
     var body: some View {
@@ -342,7 +376,6 @@ struct HologramCompareView: View {
         .foregroundStyle(.white)
         .onAppear {
             tracker.start()   // 動いていれば何もしない
-            scale = diagnostics.distanceScale
             predictionMS = min(diagnostics.oePredMS, HologramCalibrationStore.predictionRangeMS.upperBound)
             diagnostics.rig?.setCompareRodHeight(Float(rodCM / 100))
             diagnostics.rig?.setCompareMode(true)
@@ -350,29 +383,21 @@ struct HologramCompareView: View {
         .onDisappear {
             // 決定していなければ、保存済みの値へ戻る
             diagnostics.rig?.setCompareMode(false)
-            diagnostics.rig?.setDistanceScale(Float(diagnostics.distanceScale))
             diagnostics.rig?.setOneEuroPred(Float(diagnostics.oePredMS / 1000))
         }
         .onChange(of: rodCM) { _, v in diagnostics.rig?.setCompareRodHeight(Float(v / 100)) }
-        .onChange(of: scale) { _, v in diagnostics.rig?.setDistanceScale(Float(v)) }
         .onChange(of: predictionMS) { _, v in diagnostics.rig?.setOneEuroPred(Float(v / 1000)) }
     }
 
     private var controls: some View {
         VStack(spacing: 8) {
-            Text("十字の上に、ペンのキャップなど高さ 3〜5cm の物を立ててください")
+            Text("十字の上に、ペンのキャップなどを立て、仮想の棒の高さをキャップに合わせてください。片目を閉じて頭をゆっくり動かし、2本の先の並びが変わらなければ合っています")
                 .font(.subheadline.bold())
-                .multilineTextAlignment(.center)
-            Text("片目を閉じて、頭をゆっくり左右・上下に動かしてください。本物と仮想の棒の先が、同じように動きますか")
-                .font(.footnote)
                 .multilineTextAlignment(.center)
             if tracker.mode != .tracking {
                 Text("顔が見えていません").font(.caption).foregroundStyle(.orange)
             }
-            HStack(alignment: .top, spacing: 16) {
-                scaleControls
-                predictionControls
-            }
+            predictionControls
             HStack {
                 Text("棒の高さ \(String(format: "%.1f", rodCM)) cm").font(.caption)
                 Slider(value: $rodCM, in: 2...6, step: 0.5)
@@ -382,32 +407,6 @@ struct HologramCompareView: View {
                 Button("決定", action: decide).bold()
             }
         }
-    }
-
-    private var scaleControls: some View {
-        VStack(spacing: 6) {
-            Text("距離の倍率 ×\(String(format: "%.2f", scale))").font(.caption.bold())
-            // 同じ「大きく動く」でも、棒の先が映るパネルで直す向きが逆になる。
-            // 上パネルは倍率を上げると動きが減り、下パネルの上下の動きは倍率を上げると増える
-            TimelineView(.periodic(from: .now, by: 0.25)) { _ in
-                let panel = diagnostics.rig?.snapshot.compareTipPanel
-                let step = HologramCalibrationStore.distanceScaleStep
-                let whenLarger = panel == .upper ? step : -step
-                VStack(spacing: 6) {
-                    Text(panelGuide(panel)).font(.caption2).multilineTextAlignment(.center)
-                    HStack {
-                        Button("仮想の方が\n大きく動く") { nudgeScale(whenLarger) }
-                        Button("仮想の方が\n小さく動く") { nudgeScale(-whenLarger) }
-                    }
-                    .font(.caption)
-                    .buttonStyle(.bordered)
-                    .disabled(panel == nil)
-                }
-            }
-            Slider(value: $scale, in: HologramCalibrationStore.distanceScaleRange,
-                   step: HologramCalibrationStore.distanceScaleStep)
-        }
-        .frame(maxWidth: .infinity)
     }
 
     private var predictionControls: some View {
@@ -431,25 +430,12 @@ struct HologramCompareView: View {
         diagnostics.rig?.averageLatencyMS.map { String(format: "%.0f ms", $0) } ?? "—"
     }
 
-    private func panelGuide(_ panel: HologramRig.ComparePanel?) -> String {
-        switch panel {
-        case .upper: return "棒の先は上パネルに映っています。左右か上下の動きで比べてください"
-        case .lower: return "棒の先は下パネルに映っています。上下の動きで比べてください"
-        case nil: return "棒の先が画面の外です。頭の位置か棒の高さを変えてください"
-        }
-    }
-
-    private func nudgeScale(_ delta: Double) {
-        scale = HologramCalibrationStore.clampedDistanceScale(scale + delta)
-    }
-
     private func nudgePrediction(_ delta: Double) {
         let r = HologramCalibrationStore.predictionRangeMS
         predictionMS = min(max(predictionMS + delta, r.lowerBound), r.upperBound)
     }
 
     private func decide() {
-        diagnostics.distanceScale = HologramCalibrationStore.clampedDistanceScale(scale)
         diagnostics.oePredMS = predictionMS
         onFinish()
     }

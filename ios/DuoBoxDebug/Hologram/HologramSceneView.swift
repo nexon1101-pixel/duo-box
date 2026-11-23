@@ -124,16 +124,26 @@ final class HologramRig {
     private var _showMarkers = false        // 位置合わせマーカーの表示
     func setShowMarkers(_ v: Bool) { tuneLock.lock(); _showMarkers = v; tuneLock.unlock() }
     private var showMarkers: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _showMarkers }
-    /// G4 の確認の場面：部屋とキャラを隠し、画面の奥に格子の箱だけを出す
+    /// 確認の場面：部屋とキャラを隠し、上下パネルの奥に L 字の格子の箱だけを出す
     static let checkBoxDepth: Float = 0.030
+    static let checkBoxGridStep: Float = 0.020
     private var _checkMode = false
     func setCheckMode(_ v: Bool) { tuneLock.lock(); _checkMode = v; tuneLock.unlock() }
     private var checkMode: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _checkMode }
+    /// 計測パネルから単独で開く L 字の箱。キャリブレーションの箱の確認とは別のフラグで持つ
+    private var _lBoxMode = false
+    func setLBoxMode(_ v: Bool) { tuneLock.lock(); _lBoxMode = v; tuneLock.unlock() }
+    private var lBoxMode: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _lBoxMode }
     private let checkBoxNode = SCNNode()
-    private var checkBoxSize: SIMD2<Float>?
+    /// 箱を作ったときの形（角度は 0.05° 刻み）。変わったときだけ作り直す
+    private struct CheckBoxKey: Equatable {
+        var angle: Int32
+        var width: Float, upperH: Float, lowerH: Float
+    }
+    private var checkBoxKey: CheckBoxKey?
     /// 本物の物と比べる場面：人形と部屋を隠し、床の格子・十字・仮想の棒だけを出す
-    static let compareCrossFromEdge: Float = 0.020   // 下パネルの手前の端から十字まで（m）
-    enum ComparePanel { case upper, lower }
+    static let compareRodFromEdge: Float = 0.020     // 下パネルの手前の端から仮想の棒まで（m）
+    static let compareCrossLeftOfRod: Float = 0.030  // 仮想の棒から左の十字まで（m）
     private var _compareMode = false
     private var _compareRodHeight: Float = 0.04
     func setCompareMode(_ v: Bool) { tuneLock.lock(); _compareMode = v; tuneLock.unlock() }
@@ -268,8 +278,6 @@ final class HologramRig {
         var hasFrame = false
         /// 実際に使っているパネル寸法（mm）：幅・上・下。レイアウトを取り込むまでは nil
         var panelMM: SIMD3<Float>?
-        /// 比べる場面で、棒の先が映っているパネル（画面の外なら nil）
-        var compareTipPanel: ComparePanel?
     }
     private let snapLock = NSLock()
     private var _snap = Snapshot()
@@ -300,7 +308,7 @@ final class HologramRig {
         buildCompareNode()
     }
 
-    /// 十字と仮想の棒を作る。原点は十字の中心、+y が下パネルの法線。棒の高さは update で合わせる
+    /// 十字と仮想の棒を作る。原点は棒の根元、+y が下パネルの法線。十字は棒の左。棒の高さは update で合わせる
     private func buildCompareNode() {
         func material(_ c: UIColor) -> SCNMaterial {
             let m = SCNMaterial()
@@ -313,9 +321,15 @@ final class HologramRig {
             let arm = SCNBox(width: w, height: 0.0002, length: l, chamferRadius: 0)
             arm.materials = [crossMaterial]
             let n = SCNNode(geometry: arm)
-            n.simdPosition = SIMD3(0, 0.0005, 0)
+            n.simdPosition = SIMD3(-Self.compareCrossLeftOfRod, 0.0005, 0)
             compareNode.addChildNode(n)
         }
+        // 棒の根元（ガラスに接するところ）の小さな印
+        let rootMark = SCNCylinder(radius: 0.0022, height: 0.0002)
+        rootMark.materials = [material(.cyan)]
+        let rootNode = SCNNode(geometry: rootMark)
+        rootNode.simdPosition = SIMD3(0, 0.0005, 0)
+        compareNode.addChildNode(rootNode)
         let rod = SCNCylinder(radius: 0.0008, height: 1)
         rod.materials = [material(.orange)]
         compareRod.geometry = rod
@@ -737,10 +751,65 @@ final class HologramRig {
         charBuilt = true
     }
 
-    /// 上パネルの窓の奥に、10mm 格子の箱を作る。原点は箱の手前の下辺の中央（描画スレッド専用）
-    private func rebuildCheckBox() {
-        checkBoxNode.childNodes.forEach { $0.removeFromParentNode() }
-        let w = width, h = upperH, depth = Self.checkBoxDepth
+    /// 上下パネルの奥に、折り目でつながる L 字の格子の箱を作る（描画スレッド専用）。
+    /// 頂点は世界座標で持つ。各パネルの面を「折り目からの距離 s」と「面からの高さ h（奥が負）」で表し、
+    /// 上下の奥の面が交わる線（s = corner）を格子の原点にするので、折り目をまたぐ線がつながる
+    private func rebuildCheckBox(angle th: Float) {
+        let depth = Self.checkBoxDepth, step = Self.checkBoxGridStep
+        let hw = width / 2
+        let lineWidth: Float = 0.0005, lift: Float = 0.00015   // 線の太さと、面から浮かせる量
+        let lowerFace = lowerPlane(angle: th)
+        // 奥の面どうしの交線。180° で折り目の真後ろ（0）、折るほど折り目より外側（負）へ移る
+        let corner = -depth * cos(th / 2) / max(sin(th / 2), 0.01)
+        let xAxis = SIMD3<Float>(1, 0, 0)
+        let panels: [(along: SIMD3<Float>, normal: SIMD3<Float>, end: Float)] = [
+            (SIMD3<Float>(0, 1, 0), SIMD3<Float>(0, 0, 1), foldHalfGap + upperH),
+            (lowerFace.d, lowerFace.normal, foldHalfGap + lowerH),
+        ]
+        var vertices: [SCNVector3] = []
+        var backIndices: [Int32] = [], sideIndices: [Int32] = [], lineIndices: [Int32] = []
+        func quad(_ q: [SIMD3<Float>], _ indices: inout [Int32]) {
+            let n = Int32(vertices.count)
+            vertices += q.map { SCNVector3($0.x, $0.y, $0.z) }
+            indices += [n, n + 1, n + 2, n, n + 2, n + 3]
+        }
+        func line(_ from: SIMD3<Float>, _ to: SIMD3<Float>, across: SIMD3<Float>, inward: SIMD3<Float>) {
+            let w = across * (lineWidth / 2), o = inward * lift
+            quad([from - w + o, from + w + o, to + w + o, to - w + o], &lineIndices)
+        }
+        let columns = Int((hw / step).rounded(.down))
+        let xs: [Float] = [-hw, hw] + (-columns...columns).map { Float($0) * step }
+        for panel in panels {
+            let e = panel.along, n = panel.normal, end = panel.end
+            func at(_ x: Float, _ s: Float, _ h: Float) -> SIMD3<Float> { xAxis * x + e * s + n * h }
+            // 奥の面・端の面・左右の面（左右は折り目と奥の交線を結ぶ斜めの辺で、上下の箱に分ける）
+            quad([at(-hw, corner, -depth), at(hw, corner, -depth), at(hw, end, -depth), at(-hw, end, -depth)], &backIndices)
+            quad([at(-hw, end, -depth), at(hw, end, -depth), at(hw, end, 0), at(-hw, end, 0)], &sideIndices)
+            for sx in [-hw, hw] {
+                quad([at(sx, 0, 0), at(sx, end, 0), at(sx, end, -depth), at(sx, corner, -depth)], &sideIndices)
+            }
+            // 折り目をまたぐ線（x が一定）
+            for x in xs {
+                line(at(x, corner, -depth), at(x, end, -depth), across: xAxis, inward: n)
+                line(at(x, end, -depth), at(x, end, 0), across: xAxis, inward: -e)
+            }
+            // 折り目と平行な線。左右の面では斜めの辺の内側だけに引く
+            for s in stride(from: corner, through: end, by: step) {
+                line(at(-hw, s, -depth), at(hw, s, -depth), across: e, inward: n)
+                let top: Float = s < 0 && corner < 0 ? -depth * s / corner : 0
+                for sx in [-hw, hw] {
+                    line(at(sx, s, -depth), at(sx, s, top), across: e, inward: xAxis * (sx < 0 ? 1 : -1))
+                }
+            }
+            // 奥行きの線
+            for h in stride(from: -step, to: -depth, by: -step) {
+                let start = corner * (h / -depth)
+                for sx in [-hw, hw] {
+                    line(at(sx, start, h), at(sx, end, h), across: n, inward: xAxis * (sx < 0 ? 1 : -1))
+                }
+                line(at(-hw, end, h), at(hw, end, h), across: n, inward: -e)
+            }
+        }
         func material(_ c: UIColor) -> SCNMaterial {
             let m = SCNMaterial()
             m.lightingModel = .constant
@@ -748,56 +817,14 @@ final class HologramRig {
             m.isDoubleSided = true
             return m
         }
-        let lineMaterial = material(UIColor(red: 0.55, green: 0.85, blue: 1.0, alpha: 1))
-        func add(_ geometry: SCNGeometry, _ position: SIMD3<Float>, euler: SIMD3<Float> = .zero) {
-            let n = SCNNode(geometry: geometry)
-            n.simdPosition = position
-            n.simdEulerAngles = euler
-            checkBoxNode.addChildNode(n)
+        let elements = [backIndices, sideIndices, lineIndices].map {
+            SCNGeometryElement(indices: $0, primitiveType: .triangles)
         }
-        func plane(_ pw: Float, _ ph: Float, _ c: UIColor) -> SCNPlane {
-            let p = SCNPlane(width: CGFloat(pw), height: CGFloat(ph))
-            p.materials = [material(c)]
-            return p
-        }
-        func bar(_ x: Float, _ y: Float, _ z: Float) -> SCNBox {
-            let b = SCNBox(width: CGFloat(x), height: CGFloat(y), length: CGFloat(z), chamferRadius: 0)
-            b.materials = [lineMaterial]
-            return b
-        }
-        let t: Float = 0.0005, step: Float = 0.010
-        // 奥の面と4つの側面
-        add(plane(w, h, UIColor(red: 0.10, green: 0.13, blue: 0.20, alpha: 1)), SIMD3(0, h / 2, -depth))
-        let side = UIColor(red: 0.15, green: 0.19, blue: 0.28, alpha: 1)
-        add(plane(depth, h, side), SIMD3(-w / 2, h / 2, -depth / 2), euler: SIMD3(0, .pi / 2, 0))
-        add(plane(depth, h, side), SIMD3(w / 2, h / 2, -depth / 2), euler: SIMD3(0, .pi / 2, 0))
-        add(plane(w, depth, side), SIMD3(0, h, -depth / 2), euler: SIMD3(.pi / 2, 0, 0))
-        add(plane(w, depth, side), SIMD3(0, 0, -depth / 2), euler: SIMD3(.pi / 2, 0, 0))
-        // 奥の面の格子と、側面を奥へ伸びる線
-        var x = -w / 2 + (w.truncatingRemainder(dividingBy: step)) / 2
-        while x <= w / 2 {
-            add(bar(t, h, t), SIMD3(x, h / 2, -depth + t))
-            add(bar(t, t, depth), SIMD3(x, t, -depth / 2))
-            add(bar(t, t, depth), SIMD3(x, h - t, -depth / 2))
-            x += step
-        }
-        var y = (h.truncatingRemainder(dividingBy: step)) / 2
-        while y <= h {
-            add(bar(w, t, t), SIMD3(0, y, -depth + t))
-            add(bar(t, t, depth), SIMD3(-w / 2 + t, y, -depth / 2))
-            add(bar(t, t, depth), SIMD3(w / 2 - t, y, -depth / 2))
-            y += step
-        }
-        // 側面を一周する、奥行き 10mm ごとの線
-        var z = -step
-        while z > -depth {
-            add(bar(w, t, t), SIMD3(0, t, z))
-            add(bar(w, t, t), SIMD3(0, h - t, z))
-            add(bar(t, h, t), SIMD3(-w / 2 + t, h / 2, z))
-            add(bar(t, h, t), SIMD3(w / 2 - t, h / 2, z))
-            z -= step
-        }
-        checkBoxSize = SIMD2(w, h)
+        let geometry = SCNGeometry(sources: [SCNGeometrySource(vertices: vertices)], elements: elements)
+        geometry.materials = [material(UIColor(red: 0.10, green: 0.13, blue: 0.20, alpha: 1)),
+                              material(UIColor(red: 0.15, green: 0.19, blue: 0.28, alpha: 1)),
+                              material(UIColor(red: 0.55, green: 0.85, blue: 1.0, alpha: 1))]
+        checkBoxNode.geometry = geometry
     }
 
     /// モデルを1回だけ読み、材質を修正してキャッシュする。読めなければ nil（以後も再試行しない）。
@@ -1090,8 +1117,8 @@ final class HologramRig {
         idleNode.simdScale = SIMD3(hs, hs, hs)
         padNode.simdScale = SIMD3(hs, 1, hs)   // 台座の半径も身長に連動（厚みは変えない）
 
-        // G4 の確認の場面：部屋とキャラを隠して箱だけにする
-        let check = checkMode && !compare
+        // 確認の場面：部屋とキャラを隠して箱だけにする
+        let check = (checkMode || lBoxMode) && !compare
         let hideWorld = check || compare
         if worldNode.isHidden != hideWorld { worldNode.isHidden = hideWorld }
         if floorFrame.isHidden != check { floorFrame.isHidden = check }
@@ -1101,23 +1128,21 @@ final class HologramRig {
         if standNode.isHidden != compare { standNode.isHidden = compare }
         for l in floorLines where l.node.isHidden != compare { l.node.isHidden = compare }
         if compareNode.isHidden == compare { compareNode.isHidden = !compare }
-        var compareTipPanel: ComparePanel?
         if compare {
             let rodH = compareRodHeight
-            let crossZ = lowerH / 2 - Self.compareCrossFromEdge
-            compareNode.simdPosition = SIMD3(0, 0, crossZ)
+            compareNode.simdPosition = SIMD3(0, 0, lowerH / 2 - Self.compareRodFromEdge)
             compareRod.simdPosition = SIMD3(0, rodH / 2, 0)
             compareRod.simdScale = SIMD3(1, rodH, 1)
             compareTip.simdPosition = SIMD3(0, rodH, 0)
-            let tipWorld = lower.center + lower.d * crossZ + lower.normal * rodH
-            let m = windowMargins(tipWorld, eye: eye, d: lower.d, n: lower.normal)
-            if let u = m.upper, u >= 0 { compareTipPanel = .upper }
-            else if let l = m.lower, l >= 0 { compareTipPanel = .lower }
         }
         if checkBoxNode.isHidden == check { checkBoxNode.isHidden = !check }
         if check {
-            if checkBoxSize != SIMD2(width, upperH) { rebuildCheckBox() }
-            checkBoxNode.simdPosition = SIMD3(0, foldHalfGap, 0)
+            let key = CheckBoxKey(angle: Int32((angleDegNow * 20).rounded()),
+                                  width: width, upperH: upperH, lowerH: lowerH)
+            if key != checkBoxKey {
+                rebuildCheckBox(angle: th)
+                checkBoxKey = key
+            }
         }
 
         // 上パネル：中心 (0, foldHalfGap + upperH/2, 0)、右 +x、上 +y
@@ -1177,8 +1202,7 @@ final class HologramRig {
                          foldGapMM: foldHalfGap * 2 * 1000,
                          materialFound: materialFound, materialTotal: materialTotal,
                          hasFrame: true,
-                         panelMM: layoutApplied ? SIMD3(width, upperH, lowerH) * 1000 : nil,
-                         compareTipPanel: compareTipPanel)
+                         panelMM: layoutApplied ? SIMD3(width, upperH, lowerH) * 1000 : nil)
         snapLock.unlock()
     }
 

@@ -14,6 +14,8 @@ struct HologramView: View {
     @State private var showCalibration = false
     /// 本物の物と比べる場面（計測パネルから単独で開く）
     @State private var showCompare = false
+    /// L 字の確認の箱（計測パネルから単独で開く）
+    @State private var showLBox = false
 
     /// この角度未満で「画面を開いてください」を出し、この角度以上で消す。間は前の状態を保つ
     static let openPromptShowBelowDeg: Double = 60
@@ -85,11 +87,23 @@ struct HologramView: View {
                     .allowsHitTesting(false)
             }
 
+            if showLBox {
+                HologramLBoxView(hinge: hinge, diagnostics: diagnostics,
+                                 onClose: { showLBox = false })
+            }
+
             // 計測パネル（三本指タップで開閉）
             if showDebugPanel {
                 HologramDebugPanel(hinge: hinge, tracker: tracker, diagnostics: diagnostics,
-                                   onCalibrate: { showDebugPanel = false; showCalibration = true },
-                                   onCompare: { showDebugPanel = false; showCompare = true },
+                                   onCalibrate: { showDebugPanel = false; showLBox = false; showCalibration = true },
+                                   onCompare: { showDebugPanel = false; showLBox = false; showCompare = true },
+                                   isLBoxOpen: showLBox,
+                                   onToggleLBox: {
+                                       showDebugPanel = false
+                                       showCalibration = false
+                                       showCompare = false
+                                       showLBox.toggle()
+                                   },
                                    onClose: { showDebugPanel = false })
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
