@@ -350,17 +350,19 @@ struct HologramDebugPanel: View {
             Text("目の位置は絶対位置のみ：カメラの位置（機種プロファイル）＋ 軸対応後の目位置。ホーム記録と視差ゲインは廃止した")
                 .font(.caption2).foregroundStyle(.white.opacity(0.7))
 
-            // 変換前後の表示：rel（ARKit生）→ head（向き変換後）→ 変換後（軸対応適用後）→ シーン座標
+            // 変換前後の表示：カメラ座標（ARKit）→ 画面座標（viewMatrix）→ 軸対応後 → シーン座標
             TimelineView(.periodic(from: .now, by: 0.2)) { _ in
                 let h = tracker.head
                 let mp = tracker.mappedHead
                 let r = tracker.rawRel
                 let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
                 VStack(alignment: .leading, spacing: 3) {
-                    row("真の生値 rel(m)", String(format: "x%+.3f y%+.3f z%+.3f", r.x, r.y, r.z))
-                    row("rel.z（符号つき）", String(format: "%+.3f m", r.z))
-                    row("距離 |rel.z| クランプ前／後", String(format: "%.3f ／ %.3f m", tracker.rawDistance, h.z))
-                    row("変換後 head(m)", String(format: "x%+.3f y%+.3f z%+.3f", h.x, h.y, h.z))
+                    let sc = tracker.screenRel
+                    row("変換前 カメラ座標(m)", String(format: "x%+.3f y%+.3f z%+.3f", r.x, r.y, r.z))
+                    row("変換後 画面座標(m)", String(format: "x%+.3f y%+.3f z%+.3f", sc.x, sc.y, sc.z))
+                    row("距離 −z 丸め前／後", String(format: "%+.3f ／ %.3f m", tracker.rawDistance, h.z))
+                    row("距離の符号が逆", "\(tracker.wrongSignCount) 回")
+                    row("使用中 head(m)", String(format: "x%+.3f y%+.3f z%+.3f", h.x, h.y, h.z))
                     row("軸対応後(m)", String(format: "x%+.3f y%+.3f z%+.3f", mp.x, mp.y, mp.z))
                     row("シーン座標(m)", String(format: "x%+.3f y%+.3f z%+.3f", s.eye.x, s.eye.y, s.eye.z))
                     row("顔", tracker.faceActive ? "捕捉中" : "見えていません")

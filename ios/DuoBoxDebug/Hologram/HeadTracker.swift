@@ -2,8 +2,9 @@ import ARKit
 import AVFoundation
 import SwiftUI
 
-/// 顔トラッキングで「目の位置」を取る。座標は **フロントカメラのレンズを原点にした、上パネル基準**（単位はメートル）。
-///   x: 画面の右が +、y: 画面の上が +、z: 画面から利用者へ向かう距離（常に正）
+/// 顔トラッキングで「目の位置」を取る。座標は **フロントカメラのレンズを原点にした、画面の向き基準**（単位はメートル）。
+/// ARKit の viewMatrix(for: 画面の向き) で変換する（x: 画面の右、y: 画面の上、−z: 画面の前）。
+/// head の z は距離（−z）で、正の値だけを 0.15〜0.9m に丸めて使う。
 /// 目の位置は左右の目（leftEyeTransform / rightEyeTransform）の中点。
 /// 上パネル座標（折り目が原点）へ直すときは、呼び出し側がカメラの位置（機種プロファイル）を足す。
 final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
@@ -21,23 +22,29 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     /// 描画スレッドから読むための最新の頭位置。lock で保護する。
     private let lock = NSLock()
     private var _head = SIMD3<Float>(0, 0, 0.30)
-    private var _rawRel = SIMD3<Float>(0, 0, 0)   // 変換前の本当の生値（ARKitカメラ座標。向き変換・abs・クランプを通す前）
-    private var _rawDistance: Float = 0        // クランプ前の距離 abs(rel.z)
+    private var _rawRel = SIMD3<Float>(0, 0, 0)   // 変換前の生値（ARKit のカメラ座標）
+    private var _screenRel = SIMD3<Float>(0, 0, 0) // 変換後の生値（画面座標。丸める前）
+    private var _rawDistance: Float = 0        // 丸める前の距離 −z（符号つき）
+    private var _wrongSignCount = 0            // 距離が 0 以下で捨てた回数
     private var _faceActive = false
     private var _lastFaceTime: TimeInterval?   // 最後に顔を捉えた時刻（CACurrentMediaTime）
 
     var head: SIMD3<Float> { lock.lock(); defer { lock.unlock() }; return _head }
-    /// 切り分け表示用：クランプ前の距離 abs(rel.z)（m）。クランプ後は head.z
+    /// 切り分け表示用：丸める前の距離 −z（m、符号つき）。丸めた後は head.z
     var rawDistance: Float { lock.lock(); defer { lock.unlock() }; return _rawDistance }
-    /// 切り分け表示用：didUpdate で計算した rel そのもの（符号もクランプもそのまま）
+    /// 切り分け表示用：変換前（ARKit のカメラ座標）
     var rawRel: SIMD3<Float> { lock.lock(); defer { lock.unlock() }; return _rawRel }
+    /// 切り分け表示用：変換後（画面座標：x 右、y 上、−z 前）
+    var screenRel: SIMD3<Float> { lock.lock(); defer { lock.unlock() }; return _screenRel }
+    /// 距離の符号が逆（目が画面の後ろ）で捨てた回数
+    var wrongSignCount: Int { lock.lock(); defer { lock.unlock() }; return _wrongSignCount }
     var faceActive: Bool { lock.lock(); defer { lock.unlock() }; return _faceActive }
 
     // MARK: - 軸対応（固定値）
     // 目の位置は絶対位置だけを使う：シーン側の目の位置 = カメラの位置（機種プロファイル）+ map(head)。
     // ホーム（基準位置の記録）と視差ゲインは廃止した（手順4）。残る変換は軸対応だけ。
-    // 軸対応は「その場で測る手順」ではなく固定値として持ち、実機でマーカーを見て外れていれば
-    // パネルのセレクタで直す（値は保存される）。
+    // 軸対応は機種IDごとに保存する。保存値がなければ「そのまま」を使う。
+    // 旧キー hologram.calib.axis は手書きの入れ替え後の座標に対する値なので、読まない。
 
     /// 生座標→シーン座標の軸対応。sceneX = xSign × raw[xAxis]、sceneY = ySign × raw[yAxis]（軸 0=x, 1=y, 2=z）。z は常に raw の距離。
     struct AxisMap: Equatable {
@@ -53,9 +60,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    private enum Key {
-        static let axis = "hologram.calib.axis"      // [xAxis, xSign, yAxis, ySign]
-    }
+    private let machineID = HologramDeviceProfile.readMachineID()
 
     /// UI 用（メインスレッドで更新）。描画スレッドは lock 内の lockedAxisMap を読む。
     @Published private(set) var axisMap = AxisMap.identity
@@ -65,10 +70,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     /// 起動時に保存値を復元する（init から）。旧バージョンのホーム／ゲインの保存値は掃除する
     private func loadCalibration() {
         let d = UserDefaults.standard
-        if let a = d.array(forKey: Key.axis) as? [Double], a.count == 4 {
-            lockedAxisMap = AxisMap(xAxis: min(max(Int(a[0]), 0), 2), xSign: a[1] < 0 ? -1 : 1,
-                               yAxis: min(max(Int(a[2]), 0), 2), ySign: a[3] < 0 ? -1 : 1)
-        }
+        lockedAxisMap = HologramCalibrationStore.axisMap(machineID: machineID) ?? .identity
         d.removeObject(forKey: "hologram.calib.homeRaw")
         d.removeObject(forKey: "hologram.calib.gain")
         axisMap = lockedAxisMap
@@ -80,8 +82,8 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     private func saveAxisMap() {
-        let m = lockedAxisMap
-        UserDefaults.standard.set([Double(m.xAxis), Double(m.xSign), Double(m.yAxis), Double(m.ySign)], forKey: Key.axis)
+        lock.lock(); let m = lockedAxisMap; lock.unlock()
+        HologramCalibrationStore.saveAxisMap(m, machineID: machineID)
     }
 
     /// 軸対応の固定値を選び直す（マーカーで見て外れていた場合用）
@@ -227,21 +229,22 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         let eyeMid = (leftEye + rightEye) * 0.5
         // カメラ座標へ直す（カメラは端末と一緒に動くので、カメラから見た相対位置を取る）
         let rel = simd_mul(simd_inverse(frame.camera.transform), eyeMid)
-        // カメラ座標は「横向き（ホームボタン右）」基準。画面の向きに合わせて x/y を入れ替える
-        var sx: Float = 0, sy: Float = 0
-        switch Self.interfaceOrientation() {
-        case .landscapeRight:      (sx, sy) = (rel.x, rel.y)
-        case .landscapeLeft:       (sx, sy) = (-rel.x, -rel.y)
-        case .portraitUpsideDown:  (sx, sy) = (-rel.y, rel.x)
-        default:                   (sx, sy) = (rel.y, -rel.x)   // 縦持ち
-        }
-        // 目はカメラの前（-z 側）にいるので、距離は -z。極端な値は丸める
-        let rawDist = abs(rel.z)
-        let dist = min(max(rawDist, 0.15), 0.9)
+        // 画面の向きに合わせた座標（x 右、y 上、−z 前）を ARKit から取る。向きはメインで更新したキャッシュ
+        let screen = simd_mul(frame.camera.viewMatrix(for: Self.interfaceOrientation()), eyeMid)
+        let rawDist = -screen.z
+        let screenRel = SIMD3<Float>(screen.x, screen.y, screen.z)
         lock.lock()
         _rawRel = SIMD3<Float>(rel.x, rel.y, rel.z)
+        _screenRel = screenRel
         _rawDistance = rawDist
-        _head = SIMD3<Float>(sx, sy, dist)
+        // 目が画面の前にないとき（0 以下）と有限でないときは、その回の値を捨てて前の位置を保つ
+        guard rawDist > 0, screen.x.isFinite, screen.y.isFinite, rawDist.isFinite else {
+            if rawDist <= 0 { _wrongSignCount += 1 }
+            _faceActive = false
+            lock.unlock()
+            return
+        }
+        _head = SIMD3<Float>(screen.x, screen.y, min(max(rawDist, 0.15), 0.9))
         _faceActive = true
         _lastFaceTime = CACurrentMediaTime()
         lock.unlock()
@@ -277,7 +280,8 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     private static func interfaceOrientation() -> UIInterfaceOrientation {
         guard Thread.isMainThread else { return cachedOrientation }
         let scene = UIApplication.shared.connectedScenes.first { $0 is UIWindowScene } as? UIWindowScene
-        cachedOrientation = scene?.interfaceOrientation ?? .portrait
+        let current = scene?.interfaceOrientation ?? .portrait
+        cachedOrientation = current == .unknown ? .portrait : current
         return cachedOrientation
     }
 }
