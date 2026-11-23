@@ -152,6 +152,18 @@ final class HologramRig {
     func setLBoxMode(_ v: Bool) { tuneLock.lock(); _lBoxMode = v; tuneLock.unlock() }
     private var lBoxMode: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _lBoxMode }
     private let checkBoxNode = SCNNode()
+    /// 偽装枠：ガラスの面に描く白い枠。人形の頭が枠の上の帯より手前に出て、枠を破って飛び出して見える
+    private let fakeFrameNode = SCNNode()
+    private let frameUpperTop = SCNNode(), frameUpperLeft = SCNNode(), frameUpperRight = SCNNode()
+    private let frameLowerFront = SCNNode(), frameLowerLeft = SCNNode(), frameLowerRight = SCNNode()
+    private var smoothedFrameTop: Float?
+    /// 偽装枠の帯の太さ（横と手前）と、上の帯が頭に重なる量（m）
+    static let fakeFrameSide: Float = 0.007
+    static let fakeFrameOverlap: Float = 0.007
+    static let fakeFrameTopRange: ClosedRange<Float> = 0.008...0.040
+    private var _fakeFrame = true
+    func setFakeFrame(_ v: Bool) { tuneLock.lock(); _fakeFrame = v; tuneLock.unlock() }
+    private var fakeFrame: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _fakeFrame }
     /// 箱を作ったときの形（角度は 0.05° 刻み）。変わったときだけ作り直す
     private struct CheckBoxKey: Equatable {
         var angle: Int32
@@ -321,6 +333,7 @@ final class HologramRig {
         scene.rootNode.addChildNode(floorFrame)
         checkBoxNode.isHidden = true
         scene.rootNode.addChildNode(checkBoxNode)
+        buildFakeFrame()
         upperCamera.camera = SCNCamera()
         lowerCamera.camera = SCNCamera()
         scene.rootNode.addChildNode(upperCamera)
@@ -990,6 +1003,67 @@ final class HologramRig {
         return latencySamples.reduce(0, +) / Double(latencySamples.count)
     }
 
+    // MARK: - 偽装枠
+
+    /// 白い帯を6本（上の画面：上・左・右、下の画面：手前・左・右）作る。大きさと位置は update で合わせる
+    private func buildFakeFrame() {
+        let m = SCNMaterial()
+        m.lightingModel = .constant
+        m.diffuse.contents = UIColor(white: 0.93, alpha: 1)
+        for n in [frameUpperTop, frameUpperLeft, frameUpperRight, frameLowerFront, frameLowerLeft, frameLowerRight] {
+            let plane = SCNPlane(width: 1, height: 1)    // 拡縮で大きさを決める
+            plane.materials = [m]
+            n.geometry = plane
+            fakeFrameNode.addChildNode(n)
+        }
+        fakeFrameNode.isHidden = true
+        scene.rootNode.addChildNode(fakeFrameNode)
+    }
+
+    /// 帯をガラスの面（目の側へ 0.3mm）に置く。上の帯は、基準の目から見て頭が帯に少し重なる太さにする。
+    /// 帯はガラスの面にあるので頭を動かしても動かず、ガラスより手前にある頭だけが動いて、枠から飛び出して見える
+    private func updateFakeFrame(lower: (d: SIMD3<Float>, normal: SIMD3<Float>), lowerEdge: Float,
+                                 headWorld: SIMD3<Float>, k: Float) {
+        let lift: Float = 0.0003
+        let side = Self.fakeFrameSide
+        let top = foldHalfGap + upperH                      // 上の画面の上端（上パネル座標の y）
+        // 頭の先が上の画面のどの高さに見えるか（基準の目から）
+        var want = Self.fakeFrameTopRange.lowerBound
+        let e = nominalEye
+        // 頭がガラスより手前（4mm 以上）にあるときだけ重ねる。奥にあると、帯の後ろに頭が隠れて切れて見えるため
+        if headWorld.z > 0.004, e.z - headWorld.z > 0.01 {
+            let q = e + (headWorld - e) * (e.z / (e.z - headWorld.z))
+            want = top - q.y + Self.fakeFrameOverlap
+        }
+        want = min(max(want, Self.fakeFrameTopRange.lowerBound), Self.fakeFrameTopRange.upperBound)
+        let topBand = smoothedFrameTop.map { $0 + (want - $0) * k } ?? want
+        smoothedFrameTop = topBand
+
+        func place(_ node: SCNNode, center: SIMD3<Float>, xAxis: SIMD3<Float>, yAxis: SIMD3<Float>,
+                   normal: SIMD3<Float>, size: SIMD2<Float>) {
+            node.simdTransform = simd_float4x4(columns: (
+                SIMD4(xAxis * size.x, 0), SIMD4(yAxis * size.y, 0), SIMD4(normal, 0), SIMD4(center, 1)))
+        }
+        let x = SIMD3<Float>(1, 0, 0), y = SIMD3<Float>(0, 1, 0), z = SIMD3<Float>(0, 0, 1)
+        let hw = width / 2
+        // 上の画面（面 z = 0）
+        place(frameUpperTop, center: SIMD3(0, top - topBand / 2, lift), xAxis: x, yAxis: y, normal: z,
+              size: SIMD2(width + 0.01, topBand))
+        for (node, sx) in [(frameUpperLeft, Float(-1)), (frameUpperRight, Float(1))] {
+            place(node, center: SIMD3(sx * (hw - side / 2), foldHalfGap + upperH / 2, lift), xAxis: x, yAxis: y,
+                  normal: z, size: SIMD2(side, upperH + 0.01))
+        }
+        // 下の画面（面の法線 n、折り目へ向かう向き −d を上とする）
+        let n = lower.normal, up = -lower.d
+        func onLower(_ along: Float, _ sideX: Float) -> SIMD3<Float> { x * sideX + lower.d * along + n * lift }
+        place(frameLowerFront, center: onLower(lowerEdge + lowerH - side / 2, 0), xAxis: x, yAxis: up, normal: n,
+              size: SIMD2(width + 0.01, side))
+        for (node, sx) in [(frameLowerLeft, Float(-1)), (frameLowerRight, Float(1))] {
+            place(node, center: onLower(lowerEdge + lowerH / 2, sx * (hw - side / 2)), xAxis: x, yAxis: up,
+                  normal: n, size: SIMD2(side, lowerH + 0.01))
+        }
+    }
+
     // MARK: - ターンテーブル（立体感の確認用）
 
     /// 一回りにかける秒数。モデルは骨のない1つの形（amekoro_static）なので、体を弾ませる踊りは
@@ -1239,6 +1313,13 @@ final class HologramRig {
         let hs = baseCharHeight > 0.001 ? (autoH * heightScale) / baseCharHeight : 1
         idleNode.simdScale = SIMD3(hs, hs, hs)
         applyDance(time: time, height: autoH * heightScale)
+        // 偽装枠（確認の場面では出さない）
+        let showFrame = fakeFrame && !(checkMode || lBoxMode || compareMode)
+        if fakeFrameNode.isHidden == showFrame { fakeFrameNode.isHidden = !showFrame }
+        if showFrame {
+            let headWorld = standWorld + lower.normal * padHeight + upW * (autoH * heightScale)
+            updateFakeFrame(lower: (lower.d, lower.normal), lowerEdge: lowerEdge, headWorld: headWorld, k: k)
+        }
         padNode.simdScale = SIMD3(hs, 1, hs)   // 台座の半径も身長に連動（厚みは変えない）
 
         // 確認の場面：部屋とキャラを隠して箱だけにする
@@ -1437,6 +1518,8 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
             diagnostics.$showMarkers.sink { [weak self] v in self?.rig.setShowMarkers(v) }
                 .store(in: &cancellables)
             diagnostics.$showGrid.sink { [weak self] v in self?.rig.setShowGrid(v) }
+                .store(in: &cancellables)
+            diagnostics.$fakeFrame.sink { [weak self] v in self?.rig.setFakeFrame(v) }
                 .store(in: &cancellables)
         }
     }

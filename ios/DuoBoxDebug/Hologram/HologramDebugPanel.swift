@@ -81,6 +81,7 @@ final class HologramDiagnostics: ObservableObject {
         if let v = number("rulerBarLength") { rulerBarLength = v }
         if let v = t["showMarkers"] as? Bool { showMarkers = v }
         if let v = t["showGrid"] as? Bool { showGrid = v }
+        if let v = t["fakeFrame"] as? Bool { fakeFrame = v }
         tunesReady = true
     }
 
@@ -101,6 +102,7 @@ final class HologramDiagnostics: ObservableObject {
             "rulerBarLength": rulerBarLength,
             "showMarkers": showMarkers,
             "showGrid": showGrid,
+            "fakeFrame": fakeFrame,
         ]
         UserDefaults.standard.set(t, forKey: Self.tunesKey)
     }
@@ -126,6 +128,8 @@ final class HologramDiagnostics: ObservableObject {
     @Published var showMarkers = false { didSet { saveTunes() } }
     /// 格子（床と壁）の表示
     @Published var showGrid = true { didSet { saveTunes() } }
+    /// 偽装枠（白い枠を画面の中に描き、頭が枠から飛び出して見える演出）
+    @Published var fakeFrame = true { didSet { saveTunes() } }
     /// 機種プロファイル
     @Published var profileID = ""
     /// 読み取ったカメラ位置を含むプロファイル
@@ -159,6 +163,7 @@ final class HologramDiagnostics: ObservableObject {
         gainY = 1
         showMarkers = false
         showGrid = true
+        fakeFrame = true
     }
 
     /// 映像の向きを決める。向きが変わったら前の軸対応の結果は無効なので、表示も未実施へ戻す
@@ -439,6 +444,7 @@ struct HologramDebugPanel: View {
             Slider(value: $diagnostics.wLean, in: 0...1, step: 0.01)
                 .disabled(diagnostics.wAuto)
             Toggle("格子を表示（床と壁、20mm間隔）", isOn: $diagnostics.showGrid)
+            Toggle("偽装枠（白い枠から頭が飛び出して見える）", isOn: $diagnostics.fakeFrame)
                 .font(.caption)
             TimelineView(.periodic(from: .now, by: 0.5)) { _ in
                 let s = diagnostics.rig?.snapshot ?? HologramRig.Snapshot()
@@ -825,6 +831,7 @@ struct HologramDebugPanel: View {
         lines.append("向き w: \(d.wAuto ? "自動" : "手動")／実効 \(num(s?.wEff, 2))")
         lines.append("身長: 倍率 ×\(num(d.heightScale, 2))／自動 \(num(s?.autoHeightMM)) mm")
         lines.append("格子: \(d.showGrid ? "ON" : "OFF")")
+        lines.append("偽装枠: \(d.fakeFrame ? "ON" : "OFF")")
         lines.append("マーカー: \(d.showMarkers ? "ON" : "OFF")")
 
         lines.append("")
