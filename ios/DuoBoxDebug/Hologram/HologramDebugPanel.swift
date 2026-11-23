@@ -112,6 +112,9 @@ final class HologramDiagnostics: ObservableObject {
     @Published var materialTotal = 0
     /// カメラ位置を変えたときに、描画側へすぐ反映するための入り口（コンテナが設定する）
     var requestLayoutPush: (() -> Void)?
+    /// G3 の計測を実施済みか（未実施の表示に使う）
+    @Published var isCalibrated = HologramCalibrationStore.isCalibrated(machineID: HologramDeviceProfile.readMachineID())
+    @Published var calibrationResult = HologramCalibrationStore.resultText(machineID: HologramDeviceProfile.readMachineID())
 
     /// 手で合わせたカメラ位置を機種IDごとに保存し、すぐ反映する
     func saveManualCamera(belowTopMM: Double, rightMM: Double) {

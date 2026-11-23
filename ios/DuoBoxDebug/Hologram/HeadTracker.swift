@@ -1,5 +1,6 @@
 import ARKit
 import AVFoundation
+import CoreImage
 import SwiftUI
 
 /// 顔トラッキングで「目の位置」を取る。座標は **フロントカメラのレンズを原点にした、画面の向き基準**（単位はメートル）。
@@ -58,6 +59,14 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         func apply(_ r: SIMD3<Float>) -> SIMD3<Float> {
             SIMD3<Float>(xSign * r[xAxis], ySign * r[yAxis], r.z)
         }
+        /// apply の逆。x・y が別々の横軸を使っていないと戻せないので nil
+        func inverse(_ m: SIMD3<Float>) -> SIMD3<Float>? {
+            guard xAxis != yAxis, xAxis < 2, yAxis < 2 else { return nil }
+            var r = SIMD3<Float>(0, 0, m.z)
+            r[xAxis] = xSign * m.x
+            r[yAxis] = ySign * m.y
+            return r
+        }
     }
 
     private let machineID = HologramDeviceProfile.readMachineID()
@@ -104,6 +113,68 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     private var session: ARSession?
+
+    // MARK: - キャリブレーション用の映像と点（ARKit の frame を使い、別のカメラは開かない）
+
+    private weak var calibrationFeed: CalibrationFeed?
+    private var calibrationViewport = CGSize.zero
+    private var calibrationCamera: ARCamera?
+    private var calibrationOrientation = UIInterfaceOrientation.portrait
+    private var calibrationMirror = false
+    private var calibrationBusy = false
+    private var calibrationLastImage: TimeInterval = 0
+    private let calibrationQueue = DispatchQueue(label: "hologram.calibration.video", qos: .userInitiated)
+    private lazy var calibrationContext = CIContext(options: [.cacheIntermediates: false])
+
+    func setCalibrationFeed(_ feed: CalibrationFeed?, viewport: CGSize) {
+        lock.lock(); calibrationFeed = feed; calibrationViewport = viewport; lock.unlock()
+    }
+
+    /// 画面座標（x 右、y 上、z は距離）の点を、映像の上の位置（鏡写し込み）へ直す
+    func projectForCalibration(_ s: SIMD3<Float>, flip: Bool) -> CGPoint? {
+        lock.lock()
+        let storedCamera = calibrationCamera, o = calibrationOrientation, vp = calibrationViewport, mirror = calibrationMirror
+        lock.unlock()
+        guard let camera = storedCamera, vp.width > 0, vp.height > 0, s.z > 0 else { return nil }
+        let world = simd_mul(simd_inverse(camera.viewMatrix(for: o)), SIMD4<Float>(s.x, s.y, -s.z, 1))
+        let p = camera.projectPoint(SIMD3<Float>(world.x, world.y, world.z), orientation: o, viewportSize: vp)
+        guard p.x.isFinite, p.y.isFinite else { return nil }
+        return CGPoint(x: mirror != flip ? vp.width - p.x : p.x, y: p.y)
+    }
+
+    /// 映像を約15fpsで表示用の画像にする。ARFrame は持ち続けない（ARKit のバッファ枯渇を防ぐ）
+    private func feedCalibrationVideo(_ frame: ARFrame) {
+        let now = CACurrentMediaTime()
+        let o = Self.interfaceOrientation()
+        lock.lock()
+        let vp = calibrationViewport
+        guard let feed = calibrationFeed, vp.width > 0, vp.height > 0 else { lock.unlock(); return }
+        let t = frame.displayTransform(for: o, viewportSize: vp)
+        // 行列式が正なら映像は鏡写しになっていないので、自撮りと同じ向きへ左右反転する
+        let mirror = t.a * t.d - t.b * t.c > 0
+        calibrationCamera = frame.camera
+        calibrationOrientation = o
+        calibrationMirror = mirror
+        guard !calibrationBusy, now - calibrationLastImage >= 1.0 / 15 else { lock.unlock(); return }
+        calibrationBusy = true
+        calibrationLastImage = now
+        lock.unlock()
+        let buffer = frame.capturedImage
+        calibrationQueue.async { [weak self] in
+            guard let self else { return }
+            let w = CGFloat(CVPixelBufferGetWidth(buffer)), h = CGFloat(CVPixelBufferGetHeight(buffer))
+            // CI の画素（左下原点）→ 正規化画像（左上原点）→ 正規化ビュー → ビューの pt（左下原点）
+            let toNormalized = CGAffineTransform(a: 1 / w, b: 0, c: 0, d: -1 / h, tx: 0, ty: 1)
+            let toView = CGAffineTransform(a: vp.width, b: 0, c: 0, d: -vp.height, tx: 0, ty: vp.height)
+            var m = toNormalized.concatenating(t).concatenating(toView)
+            if mirror { m = m.concatenating(CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: vp.width, ty: 0)) }
+            let rect = CGRect(origin: .zero, size: vp)
+            let image = CIImage(cvPixelBuffer: buffer).transformed(by: m).cropped(to: rect)
+            let cg = self.calibrationContext.createCGImage(image, from: rect)
+            self.lock.lock(); self.calibrationBusy = false; self.lock.unlock()
+            DispatchQueue.main.async { [weak feed] in feed?.image = cg }
+        }
+    }
 
     /// 診断用：ARKit の状態（デバッグパネルが読む）。lock で保護。
     struct Diagnostics {
@@ -218,8 +289,10 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
             $0.lastFaceTracked = faces.first?.isTracked
             $0.cameraState = camState
         }
+        feedCalibrationVideo(frame)
         guard let face = faces.first, face.isTracked else {
             setFace(active: false)
+            publishCalibrationSample(nil)
             publish(.searching)
             return
         }
@@ -242,13 +315,24 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
             if rawDist <= 0 { _wrongSignCount += 1 }
             _faceActive = false
             lock.unlock()
+            publishCalibrationSample(nil)
             return
         }
         _head = SIMD3<Float>(screen.x, screen.y, min(max(rawDist, 0.15), 0.9))
         _faceActive = true
         _lastFaceTime = CACurrentMediaTime()
         lock.unlock()
+        // キャリブレーションには 1€ を通す前・カメラ位置を足す前の生の値を渡す
+        publishCalibrationSample(.init(screen: SIMD3<Float>(screen.x, screen.y, rawDist),
+                                       camera: SIMD3<Float>(rel.x, rel.y, rel.z),
+                                       time: CACurrentMediaTime()))
         publish(.tracking)
+    }
+
+    private func publishCalibrationSample(_ sample: CalibrationFeed.Sample?) {
+        lock.lock(); let current = calibrationFeed; lock.unlock()
+        guard let feed = current else { return }
+        DispatchQueue.main.async { [weak feed] in feed?.sample = sample }
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
@@ -284,4 +368,15 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
         cachedOrientation = current == .unknown ? .portrait : current
         return cachedOrientation
     }
+}
+
+/// キャリブレーション画面へ渡す映像と目の位置（メインスレッドで更新）
+final class CalibrationFeed: ObservableObject {
+    struct Sample: Equatable {
+        var screen: SIMD3<Float>   // 画面座標（x 右、y 上、z は距離）。1€ の前、カメラ位置を足す前
+        var camera: SIMD3<Float>   // ARKit のカメラ座標
+        var time: TimeInterval
+    }
+    @Published var image: CGImage?
+    @Published var sample: Sample?
 }

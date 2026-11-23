@@ -29,6 +29,33 @@ enum HologramCalibrationStore {
         }
     }
 
+    /// G3 の計測を最後まで行ったか（手で軸対応を変えても、実施済みのまま）
+    static func isCalibrated(machineID: String) -> Bool {
+        dictionary(machineID)["calibrated"] as? Bool ?? false
+    }
+
+    /// G3 の結果の文（例：画面の右＝カメラの −y）
+    static func resultText(machineID: String) -> String? {
+        dictionary(machineID)["resultText"] as? String
+    }
+
+    static func saveMeasured(_ m: HeadTracker.AxisMap, resultText: String, machineID: String) {
+        saveAxisMap(m, machineID: machineID)
+        update(machineID) {
+            $0["calibrated"] = true
+            $0["resultText"] = resultText
+        }
+    }
+
+    /// 映像と点の左右が合わないときの反転
+    static func overlayFlip(machineID: String) -> Bool {
+        dictionary(machineID)["overlayFlip"] as? Bool ?? false
+    }
+
+    static func saveOverlayFlip(_ v: Bool, machineID: String) {
+        update(machineID) { $0["overlayFlip"] = v }
+    }
+
     /// 手で合わせたカメラ位置（mm）。occlusion より優先する。無い・壊れているときは nil
     static func manualCamera(machineID: String) -> HologramDeviceProfile.ManualCamera? {
         let d = dictionary(machineID)

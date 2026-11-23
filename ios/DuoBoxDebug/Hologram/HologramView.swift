@@ -74,6 +74,15 @@ struct HologramView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .allowsHitTesting(false)
 
+            if !diagnostics.isCalibrated {
+                Text("キャリブレーション未実施")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(6)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .allowsHitTesting(false)
+            }
+
             // 計測パネル（三本指タップで開閉）
             if showDebugPanel {
                 HologramDebugPanel(hinge: hinge, tracker: tracker, diagnostics: diagnostics,
@@ -97,9 +106,8 @@ struct HologramView: View {
             .padding(.bottom, 20)
 
             if showCalibration {
-                HologramCameraAlignView(diagnostics: diagnostics,
-                                        onDecide: { showCalibration = false },
-                                        onCancel: { showCalibration = false })
+                HologramCalibrationFlow(tracker: tracker, diagnostics: diagnostics,
+                                        onClose: { showCalibration = false })
             }
         }
         .onAppear { tracker.start() }
