@@ -18,6 +18,9 @@ struct HologramView: View {
     @State private var showLBox = false
     /// 箱の確認の段の間はホームボタンを隠す（下パネルが透明になり、箱に重なるため）
     @State private var hideHomeButton = false
+    /// 状態ラベルの表示が変わった時刻（この時刻から数秒だけ出す）
+    @State private var statusChangedAt = Date()
+    static let statusVisibleSeconds: TimeInterval = 3
 
     /// この角度未満で「画面を開いてください」を出し、この角度以上で消す。間は前の状態を保つ
     static let openPromptShowBelowDeg: Double = 60
@@ -61,20 +64,24 @@ struct HologramView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
 
-            // 状態ラベル（顔トラッキング中か、ドラッグ操作かが分かる）
+            // 状態ラベル。顔を追えているあいだは 3 秒で消し、見失ったときや状態が変わったときだけ出す
+            // （上の画面の真ん中に出しっぱなしだと、人形や部屋に重なって邪魔なため）
             VStack {
-                // 秒数を1秒ごとに更新するため TimelineView で包む
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                    let tracking = tracker.mode == .tracking
+                    let recent = context.date.timeIntervalSince(statusChangedAt) < Self.statusVisibleSeconds
                     Text(statusLine)
                         .multilineTextAlignment(.center)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .opacity(!tracking || recent ? 1 : 0)
+                        .animation(.easeOut(duration: 0.4), value: !tracking || recent)
                 }
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(.top, 12)
-                    .padding(.horizontal, 16)
+                .padding(.top, 6)
+                .padding(.horizontal, 16)
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -112,6 +119,22 @@ struct HologramView: View {
 
             // 本番 RootView と同じ見た目の戻るボタン
             // 比べる場面と L 字の箱では、下パネルの十字・棒・箱に重なるので出さない
+            // 踊る（立体感の確認用）。ホームボタンの左に置く
+            if !hideHomeButton && !showCompare && !showLBox {
+                Button { diagnostics.dance.toggle() } label: {
+                    Image(systemName: diagnostics.dance ? "pause.fill" : "music.note")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 48, height: 48)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+                }
+                .accessibilityLabel(diagnostics.dance ? "踊りを止める" : "踊る")
+                .padding(.trailing, 20 + 48 + 14)
+                .padding(.bottom, 20)
+            }
+
             if !hideHomeButton && !showCompare && !showLBox {
                 Button(action: onExit) {
                     Image(systemName: "house.fill")
@@ -140,6 +163,7 @@ struct HologramView: View {
         }
         .onAppear { tracker.start() }
         .onDisappear { tracker.stop() }
+        .onChange(of: tracker.mode) { _, _ in statusChangedAt = Date() }
         .onReceive(hinge.$angleDegrees) { deg in
             let next = Self.nextNeedsOpen(current: needsOpen, angleDeg: deg)
             if next != needsOpen { needsOpen = next }

@@ -9,6 +9,10 @@ final class HologramDiagnostics: ObservableObject {
     weak var rig: HologramRig?
     /// 調整値：壁を奥へ下げる量（mm、初期値 30）と、身長の倍率（検証用、初期値 1）
     @Published var wallRecessMM: Double = 30 { didSet { saveTunes() } }
+    /// 床を下パネルのガラスより奥へ下げる量（mm）。0 だと下の画面は奥行きのない絵になる
+    @Published var floorRecessMM: Double = 25 { didSet { saveTunes() } }
+    /// 踊る（立体感の確認用。保存しない）
+    @Published var dance = false
     @Published var heightScale: Double = 1 { didSet { saveTunes() } }
     /// 前後位置 p：0＝手前の端、1＝折り目、1超＝床の角まで。既定は HologramRig.defaultPPos
     @Published var pPos: Double = Double(HologramRig.defaultPPos) { didSet { saveTunes() } }
@@ -62,6 +66,7 @@ final class HologramDiagnostics: ObservableObject {
             return v
         }
         if let v = number("wallRecessMM") { wallRecessMM = v }
+        if let v = number("floorRecessMM") { floorRecessMM = v }
         if let v = number("heightScale") { heightScale = v }
         if let v = number("pPos") { pPos = v }
         if let v = t["pAuto"] as? Bool { pAuto = v }
@@ -84,6 +89,7 @@ final class HologramDiagnostics: ObservableObject {
         guard tunesReady else { return }
         let t: [String: Any] = [
             "wallRecessMM": wallRecessMM,
+            "floorRecessMM": floorRecessMM,
             "heightScale": heightScale,
             "pPos": pPos,
             "pAuto": pAuto,
@@ -140,6 +146,7 @@ final class HologramDiagnostics: ObservableObject {
     /// 調整値を既定に戻す（距離の倍率も 1.00 へ）。軸対応・カメラ位置・角度ごとの記録・クレカの棒（実測値）は消さない
     func resetTunes() {
         wallRecessMM = 30
+        floorRecessMM = 25
         heightScale = 1
         pPos = Double(HologramRig.defaultPPos)
         pAuto = true
@@ -255,7 +262,7 @@ struct HologramDebugPanel: View {
             }
             Button("やめる", role: .cancel) {}
         } message: {
-            Text("壁の下げ量 30mm、p・w 自動（p の既定 1.0）、身長 ×1.0、動きの量の倍率 ×1.00、先読み 20ms などに戻します。キャリブレーションの結果、角度ごとの記録、クレカの棒は消えません")
+            Text("壁の下げ量 30mm、床の下げ量 25mm、p・w 自動（p の既定 1.0）、身長 ×1.0、動きの量の倍率 ×1.00、先読み 20ms などに戻します。キャリブレーションの結果、角度ごとの記録、クレカの棒は消えません")
         }
         .foregroundStyle(.white)
         .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
@@ -403,6 +410,9 @@ struct HologramDebugPanel: View {
             Text("壁を奥へ下げる量: \(String(format: "%.0f", diagnostics.wallRecessMM)) mm（初期 30）")
                 .font(.caption)
             Slider(value: $diagnostics.wallRecessMM, in: 0...100, step: 1)
+            Text("床を奥へ下げる量: \(String(format: "%.0f", diagnostics.floorRecessMM)) mm（初期 25。0 だと下の画面に奥行きが出ない）")
+                .font(.caption)
+            Slider(value: $diagnostics.floorRecessMM, in: 0...60, step: 1)
             TimelineView(.periodic(from: .now, by: 0.5)) { _ in
                 let effective = diagnostics.rig?.snapshot.effectiveRecessMM ?? Float(diagnostics.wallRecessMM)
                 row("実効（mm）", String(format: "%.1f", effective))
@@ -810,6 +820,7 @@ struct HologramDebugPanel: View {
         lines.append("")
         lines.append("【調整値】")
         lines.append("壁の下げ量: スライダー \(num(d.wallRecessMM)) mm／実効 \(num(s?.effectiveRecessMM)) mm")
+        lines.append("床の下げ量: \(num(d.floorRecessMM)) mm")
         lines.append("前後位置 p: \(d.pAuto ? "自動" : "手動")／実効 \(num(s?.pEff, 2))／pMax \(num(s?.pMax, 2))")
         lines.append("向き w: \(d.wAuto ? "自動" : "手動")／実効 \(num(s?.wEff, 2))")
         lines.append("身長: 倍率 ×\(num(d.heightScale, 2))／自動 \(num(s?.autoHeightMM)) mm")

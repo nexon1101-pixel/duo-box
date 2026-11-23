@@ -74,6 +74,15 @@ final class HologramRig {
     private var _wallRecess: Float = 0.030  // 壁を奥へ下げる量（m、初期値 30mm。パネル側の初期値と一致させる）
     private var _heightScale: Float = 1     // 身長の倍率（検証用）
     func setWallRecess(_ v: Float) { tuneLock.lock(); _wallRecess = max(v, 0); tuneLock.unlock() }
+    /// 床を下パネルのガラスより奥へ下げる量（m）。床がガラスの面にあると、下の画面は奥行きのない絵になるため。
+    /// 壁と同じく、全開に近づくと 0 へ畳む
+    private var _floorRecess: Float = 0.025
+    func setFloorRecess(_ v: Float) { tuneLock.lock(); _floorRecess = max(v, 0); tuneLock.unlock() }
+    private var floorRecessValue: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _floorRecess }
+    /// 踊る（立体感の確認用。体を回すと奥行きが分かりやすい）
+    private var _dance = false
+    func setDance(_ v: Bool) { tuneLock.lock(); _dance = v; tuneLock.unlock() }
+    private var dance: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _dance }
     func setHeightScale(_ v: Float) { tuneLock.lock(); _heightScale = max(v, 0.1); tuneLock.unlock() }
     /// 前後位置 p の既定値（記録がないとき）。実機で 0.5 は見下ろす形になって見えにくく、1.0〜1.1 の方が見やすかった
     static let defaultPPos: Float = 1.0
@@ -230,6 +239,12 @@ final class HologramRig {
             return xHat
         }
 
+        /// 速さの見積もりを 0 に戻す（顔を再び見つけたとき、先読みが跳ねないように）
+        mutating func resetVelocity() {
+            dxHat = .zero
+            prevX = xHat
+        }
+
         private static func alpha(cutoff: Float, dt: Float) -> Float {
             let tau = 1 / (2 * Float.pi * max(cutoff, 0.01))
             return 1 / (1 + tau / dt)
@@ -248,6 +263,13 @@ final class HologramRig {
     private var faceLostSince: TimeInterval?
     /// 最後に使えた目の目標（有限でない入力が来たときに保つ値）
     private var lastValidTarget: SIMD3<Float>?
+    /// 顔を見失っていたか。再び見つけたときに、表示中の位置から測った位置へフェードで移すのに使う
+    private var faceWasLost = false
+    private var reacquireFrom: SIMD3<Float>?
+    private var reacquireStart: TimeInterval = 0
+    /// 顔を見失ってから基準の位置へ戻るまで（秒）と、再び見つけてから正しい位置へ移るまで（秒）
+    static let faceLostReturnSeconds: Double = 2.0
+    static let faceReacquireSeconds: Double = 0.6
     /// 補間で得た p・w の既定値を平滑化した状態（記録が0件なら nil）
     private var smoothedPW: (p: Float, w: Float)?
     /// 自動身長の平滑化状態と、再計算を省くための前回の入力・生の結果
@@ -256,6 +278,7 @@ final class HologramRig {
         var angle: Int32, p: Int32, w: Int32
         var width: Float, upperH: Float, lowerH: Float
         var eye: SIMD3<Int32>
+        var stand: SIMD3<Int32>      // 立ち位置（床を下げる量が変わると動く）
     }
     private var lastFitKey: FitKey?
     private var lastFitRaw: Float = 0
@@ -471,7 +494,8 @@ final class HologramRig {
         let q = (fixedEye / 0.002).rounded(.toNearestOrAwayFromZero)
         let key = FitKey(angle: qi(angleDeg * 10), p: qi(p * 200), w: qi(w * 200),
                          width: width, upperH: upperH, lowerH: lowerH,
-                         eye: SIMD3<Int32>(qi(q.x), qi(q.y), qi(q.z)))
+                         eye: SIMD3<Int32>(qi(q.x), qi(q.y), qi(q.z)),
+                         stand: SIMD3<Int32>(qi(S.x * 2000), qi(S.y * 2000), qi(S.z * 2000)))
         if key == lastFitKey { return lastFitRaw }
         let raw = fittedHeight(stand: S, up: u, d: d, n: n, eye: fixedEye)
         lastFitKey = key
@@ -966,6 +990,45 @@ final class HologramRig {
         return latencySamples.reduce(0, +) / Double(latencySamples.count)
     }
 
+    // MARK: - 踊り（立体感の確認用）
+
+    /// 踊りの拍（1 分あたり）。体を左右に回す動きがあると、奥行きが分かりやすい
+    static let danceBPM: Double = 116
+    private var danceStart: TimeInterval?
+    private var danceWeight: Float = 0
+
+    /// 人形の体だけを動かす（台座と立ち位置はそのまま）。オン・オフは 0.4 秒かけて混ぜ、急に止まらない
+    private func applyDance(time: TimeInterval, height h: Float) {
+        let on = dance
+        if on, danceStart == nil { danceStart = time }
+        let step = Float(1.0 / 60 / 0.4)
+        danceWeight = min(max(danceWeight + (on ? step : -step), 0), 1)
+        guard danceWeight > 0, let start = danceStart else {
+            danceStart = nil
+            if idleNode.simdPosition != .zero { idleNode.simdPosition = .zero }
+            idleNode.simdOrientation = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
+            return
+        }
+        let t = time - start
+        let beat = t * Self.danceBPM / 60                 // 拍の数
+        let phase = Float(beat * .pi)                       // 1 拍で π
+        let k = danceWeight
+        // 拍ごとに弾む・左右に揺れる・体を傾ける
+        let bounce = abs(sin(phase)) * 0.06 * h
+        let side = sin(phase / 2) * 0.12 * h
+        let roll = sin(phase / 2) * 0.14
+        // ゆっくり左右に向きを変え、16 拍に 1 回（最後の 2 拍で）くるっと一回転する（回ると奥行きが分かりやすい）
+        let bar = beat.truncatingRemainder(dividingBy: 16)
+        var yaw = sin(Float(beat * .pi / 4)) * 0.7
+        if bar >= 14 {
+            let u = Float((bar - 14) / 2)
+            yaw += u * u * (3 - 2 * u) * 2 * .pi
+        }
+        idleNode.simdPosition = SIMD3<Float>(side, bounce, 0) * k
+        idleNode.simdOrientation = simd_quatf(angle: yaw * k, axis: SIMD3<Float>(0, 1, 0))
+            * simd_quatf(angle: roll * k, axis: SIMD3<Float>(0, 0, 1))
+    }
+
     /// 視点・折り角度を平滑化し、床の枠と2つのカメラの投影を更新する。
     func update(time: TimeInterval) {
         // 寸法とプロファイルはフレーム冒頭で一度だけ取り込む。作り直しもここ（描画スレッド）でだけ行う
@@ -998,7 +1061,21 @@ final class HologramRig {
             let g = gains
             let candidate = cameraPosition + SIMD3<Float>(sample.position.x * g.x, sample.position.y * g.y, sample.position.z)
             if candidate.x.isFinite && candidate.y.isFinite && candidate.z.isFinite {
-                target = candidate
+                // 見失っていた顔を再び見つけたら、表示中の位置から測った位置へ、なめらかに移す（跳ばない）
+                if faceWasLost {
+                    faceWasLost = false
+                    reacquireFrom = lastValidTarget
+                    reacquireStart = time
+                    eyeFilter.resetVelocity()
+                }
+                if let from = reacquireFrom {
+                    let t = Float(min(max((time - reacquireStart) / Self.faceReacquireSeconds, 0), 1))
+                    let e = t * t * (3 - 2 * t)
+                    target = from + (candidate - from) * e
+                    if t >= 1 { reacquireFrom = nil }
+                } else {
+                    target = candidate
+                }
                 usedFrameTime = sample.frameTime
                 lastFaceTarget = candidate
                 faceLostSince = nil
@@ -1006,18 +1083,18 @@ final class HologramRig {
                 target = lastValidTarget ?? nominalEye   // 有限でない入力は捨てて前の状態を保つ
             }
         } else if let last = lastFaceTarget {
-            // 顔が見えなくなったら基準へ即座に戻さず、最後の位置を 1.5 秒保ち、
-            // その後 2.5 秒かけて基準の目の位置へゆっくり戻す。戻り切ったら保持を解く。
+            // 顔が見えなくなったら、止めずに、すぐに基準の目の位置へゆっくり戻り始める（2 秒）
+            faceWasLost = true
+            reacquireFrom = nil
             if faceLostSince == nil { faceLostSince = time }
             let lost = time - (faceLostSince ?? time)
-            if lost <= 1.5 {
-                target = last + SIMD3<Float>(man.x, man.y, 0)
-            } else {
-                let f = min(Float((lost - 1.5) / 2.5), 1)
-                target = nominalEye + (last - nominalEye) * (1 - f) + SIMD3<Float>(man.x, man.y, 0)
-                if f >= 1 { lastFaceTarget = nil; faceLostSince = nil }
-            }
+            let f = Float(min(lost / Self.faceLostReturnSeconds, 1))
+            let e = f * f * (3 - 2 * f)
+            target = last + (nominalEye - last) * e + SIMD3<Float>(man.x, man.y, 0)
+            if f >= 1 { lastFaceTarget = nil; faceLostSince = nil }
         } else {
+            faceWasLost = true
+            reacquireFrom = nil
             target = nominalEye + SIMD3<Float>(man.x, man.y, 0)
         }
         lastValidTarget = target
@@ -1052,21 +1129,25 @@ final class HologramRig {
         let frameZ0 = lowerEdge + lowerH / 2        // floorFrame の原点（下パネル中央）のヒンジ軸からの距離
 
         // 床の枠：下パネルの面に合わせる（x=右、y=法線、z=端へ向かう向き。右手系）。原点は下パネルの中央
+        // 床は下パネルのガラスより floorDrop だけ奥（法線の逆向き）に置く。下の画面も箱の中をのぞく窓になる
+        let floorDrop = Self.effectiveRecess(floorRecessValue, angleDeg: th * 180 / .pi)
+        let floorOrigin = lower.center - lower.normal * floorDrop
         floorFrame.simdTransform = simd_float4x4(columns: (
-            SIMD4(1, 0, 0, 0), SIMD4(lower.normal, 0), SIMD4(lower.d, 0), SIMD4(lower.center, 1)))
+            SIMD4(1, 0, 0, 0), SIMD4(lower.normal, 0), SIMD4(lower.d, 0), SIMD4(floorOrigin, 1)))
 
         // 床と壁の交線（部屋の角）。実効の下げ量が 0 なら折り目そのもの。
         // 上下パネルは自分の面の中で軸から離れるだけで面は軸を通るので、角は G によらず両面の交線のまま（壁と床が離れない）。
         // 以降の角・壁・床・格子・幅木・壁の枠・p の上限はすべてこの実効値から求める
         let recess = Self.effectiveRecess(wallRecess, angleDeg: th * 180 / .pi)
-        let sC = -recess / max(sin(th), 0.2)        // 角の位置（折り目から d 方向への距離。負＝折り目の奥側）
-        let yC = cos(th) * sC                       // 角の高さ（上パネル座標）
+        // 床の面（下パネルの面を floorDrop だけ奥へ）と壁の面 z = -recess の交線。床の上の点は d*s - n*floorDrop
+        let sC = (-recess - cos(th) * floorDrop) / max(sin(th), 0.2)   // 角の位置（床の面の上で、折り目から d 方向への距離）
+        let yC = cos(th) * sC - sin(th) * floorDrop                     // 角の高さ（上パネル座標）
         let wallH = max(foldHalfGap + upperH + 0.3 - yC, 0.01)
         wallNode.simdPosition = SIMD3(0, yC + wallH / 2, -recess)
         wallNode.simdScale = SIMD3(1, wallH, 1)
         wallShade.simdPosition = SIMD3(0, yC + 0.015, -recess + 0.0003)
         // 床は角から下パネルの手前の端（＋2cm）まで
-        let floorEnd = lowerEdge + lowerH + 0.02
+        let floorEnd = lowerEdge + lowerH + 0.05
         let floorLen = max(floorEnd - sC, 0.01)
         floorNode.simdPosition = SIMD3(0, 0, (sC + floorEnd) / 2 - frameZ0)
         floorNode.simdScale = SIMD3(1, floorLen, 1)
@@ -1142,13 +1223,14 @@ final class HologramRig {
             * simd_quatf(angle: Self.modelFrontYaw, axis: SIMD3<Float>(0, 1, 0))
 
         // 身長は自動決定（0.6×小さい方のパネル高が既定、余裕 8mm を切る分だけ縮小）。手動の倍率はその上に掛かる
-        let standWorld = lower.center + lower.d * standNode.simdPosition.z
+        let standWorld = floorOrigin + lower.d * standNode.simdPosition.z
         let rawAutoH = cachedFittedHeight(stand: standWorld, up: upW, d: lower.d, n: lower.normal, eye: eye,
                                           angleDeg: angleDegNow, p: pEff, w: wEff)
         let autoH = smoothedAutoH.map { $0 + (rawAutoH - $0) * k } ?? rawAutoH
         smoothedAutoH = autoH
         let hs = baseCharHeight > 0.001 ? (autoH * heightScale) / baseCharHeight : 1
         idleNode.simdScale = SIMD3(hs, hs, hs)
+        applyDance(time: time, height: autoH * heightScale)
         padNode.simdScale = SIMD3(hs, 1, hs)   // 台座の半径も身長に連動（厚みは変えない）
 
         // 確認の場面：部屋とキャラを隠して箱だけにする
@@ -1316,6 +1398,10 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
             // 計測パネルの調整値を描画側へ流す
             cancellables.removeAll()
             diagnostics.$wallRecessMM.sink { [weak self] v in self?.rig.setWallRecess(Float(v) / 1000) }
+                .store(in: &cancellables)
+            diagnostics.$floorRecessMM.sink { [weak self] v in self?.rig.setFloorRecess(Float(v) / 1000) }
+                .store(in: &cancellables)
+            diagnostics.$dance.sink { [weak self] v in self?.rig.setDance(v) }
                 .store(in: &cancellables)
             diagnostics.$pPos.sink { [weak self] v in self?.rig.setPPos(Float(v)) }
                 .store(in: &cancellables)
