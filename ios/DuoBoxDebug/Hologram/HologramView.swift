@@ -12,6 +12,8 @@ struct HologramView: View {
     @State private var needsOpen = false
     /// キャリブレーション画面の表示
     @State private var showCalibration = false
+    /// 本物の物と比べる場面（計測パネルから単独で開く）
+    @State private var showCompare = false
 
     /// この角度未満で「画面を開いてください」を出し、この角度以上で消す。間は前の状態を保つ
     static let openPromptShowBelowDeg: Double = 60
@@ -87,6 +89,7 @@ struct HologramView: View {
             if showDebugPanel {
                 HologramDebugPanel(hinge: hinge, tracker: tracker, diagnostics: diagnostics,
                                    onCalibrate: { showDebugPanel = false; showCalibration = true },
+                                   onCompare: { showDebugPanel = false; showCompare = true },
                                    onClose: { showDebugPanel = false })
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
@@ -108,6 +111,11 @@ struct HologramView: View {
             if showCalibration {
                 HologramCalibrationFlow(tracker: tracker, diagnostics: diagnostics,
                                         onClose: { showCalibration = false })
+            }
+
+            if showCompare {
+                HologramCompareView(tracker: tracker, diagnostics: diagnostics,
+                                    onFinish: { showCompare = false })
             }
         }
         .onAppear { tracker.start() }

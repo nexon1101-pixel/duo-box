@@ -75,6 +75,38 @@ enum HologramCalibrationStore {
         }
     }
 
+    /// 距離の倍率の範囲と刻み。目の位置（カメラから見た x・y・z）に同じ値を掛ける
+    static let distanceScaleRange: ClosedRange<Double> = 0.6...1.6
+    static let distanceScaleStep: Double = 0.01
+    /// 先読みの範囲（ms）
+    static let predictionRangeMS: ClosedRange<Double> = 0...120
+
+    /// 範囲に収め、0.01 刻みにそろえる
+    static func clampedDistanceScale(_ v: Double) -> Double {
+        let c = min(max(v, distanceScaleRange.lowerBound), distanceScaleRange.upperBound)
+        return (c / distanceScaleStep).rounded() * distanceScaleStep
+    }
+
+    /// 保存された距離の倍率。無い・壊れているときは 1
+    static func distanceScale(machineID: String) -> Double {
+        guard let v = dictionary(machineID)["distanceScale"] as? Double, v.isFinite else { return 1 }
+        return clampedDistanceScale(v)
+    }
+
+    static func saveDistanceScale(_ v: Double, machineID: String) {
+        update(machineID) { $0["distanceScale"] = clampedDistanceScale(v) }
+    }
+
+    /// この機種で保存した先読み（ms）。無いときは nil（調整値 hologram.tunes.v1 の値を使う）
+    static func predictionMS(machineID: String) -> Double? {
+        guard let v = dictionary(machineID)["predictionMS"] as? Double, v.isFinite else { return nil }
+        return min(max(v, predictionRangeMS.lowerBound), predictionRangeMS.upperBound)
+    }
+
+    static func savePredictionMS(_ v: Double, machineID: String) {
+        update(machineID) { $0["predictionMS"] = min(max(v, predictionRangeMS.lowerBound), predictionRangeMS.upperBound) }
+    }
+
     /// 開発用：鏡映しの映像の上で、点だけをさらに左右反転する
     static func overlayFlip(machineID: String) -> Bool {
         dictionary(machineID)["overlayFlip"] as? Bool ?? false

@@ -1,4 +1,5 @@
 import Combine
+import QuartzCore
 import SceneKit
 import SwiftUI
 
@@ -74,7 +75,9 @@ final class HologramRig {
     private var _heightScale: Float = 1     // 身長の倍率（検証用）
     func setWallRecess(_ v: Float) { tuneLock.lock(); _wallRecess = max(v, 0); tuneLock.unlock() }
     func setHeightScale(_ v: Float) { tuneLock.lock(); _heightScale = max(v, 0.1); tuneLock.unlock() }
-    private var _pPos: Float = 0.5          // 前後位置 p（0＝下パネルの手前の端、1＝折り目、1超＝床の角まで）
+    /// 前後位置 p の既定値（記録がないとき）。実機で 0.5 は見下ろす形になって見えにくく、1.0〜1.1 の方が見やすかった
+    static let defaultPPos: Float = 1.0
+    private var _pPos: Float = HologramRig.defaultPPos   // 前後位置 p（0＝下パネルの手前の端、1＝折り目、1超＝床の角まで）
     func setPPos(_ v: Float) { tuneLock.lock(); _pPos = max(v, 0); tuneLock.unlock() }
     private var pPos: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _pPos }
     private var _wAuto: Bool = true          // 向き w を角度で自動にするか（既定は自動）
@@ -90,8 +93,11 @@ final class HologramRig {
     func setOneEuroBeta(_ v: Float) { tuneLock.lock(); _oeBeta = min(max(v, 0), 5); tuneLock.unlock() }
     private var oeBeta: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _oeBeta }
     private var _oePred: Float = 0.02        // 先読み時間 (秒)
-    func setOneEuroPred(_ v: Float) { tuneLock.lock(); _oePred = min(max(v, 0), 0.08); tuneLock.unlock() }
+    func setOneEuroPred(_ v: Float) { tuneLock.lock(); _oePred = min(max(v, 0), 0.12); tuneLock.unlock() }
     private var oePred: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _oePred }
+    private var _distanceScale: Float = 1    // 距離の倍率（カメラから見た目の位置の x・y・z に掛ける）
+    func setDistanceScale(_ v: Float) { tuneLock.lock(); _distanceScale = min(max(v, 0.6), 1.6); tuneLock.unlock() }
+    private var distanceScale: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _distanceScale }
     private var _pAuto: Bool = true          // 前後位置 p を角度で自動にするか（既定は自動）
     func setPAuto(_ v: Bool) { tuneLock.lock(); _pAuto = v; tuneLock.unlock() }
     private var pAuto: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _pAuto }
@@ -125,6 +131,18 @@ final class HologramRig {
     private var checkMode: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _checkMode }
     private let checkBoxNode = SCNNode()
     private var checkBoxSize: SIMD2<Float>?
+    /// 本物の物と比べる場面：人形と部屋を隠し、床の格子・十字・仮想の棒だけを出す
+    static let compareCrossFromEdge: Float = 0.020   // 下パネルの手前の端から十字まで（m）
+    enum ComparePanel { case upper, lower }
+    private var _compareMode = false
+    private var _compareRodHeight: Float = 0.04
+    func setCompareMode(_ v: Bool) { tuneLock.lock(); _compareMode = v; tuneLock.unlock() }
+    func setCompareRodHeight(_ v: Float) { tuneLock.lock(); _compareRodHeight = min(max(v, 0.02), 0.06); tuneLock.unlock() }
+    private var compareMode: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _compareMode }
+    private var compareRodHeight: Float { tuneLock.lock(); defer { tuneLock.unlock() }; return _compareRodHeight }
+    private let compareNode = SCNNode()
+    private let compareRod = SCNNode()
+    private let compareTip = SCNNode()
     private var _showGrid = true            // 格子（床と壁）の表示
     func setShowGrid(_ v: Bool) { tuneLock.lock(); _showGrid = v; tuneLock.unlock() }
     private var showGrid: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _showGrid }
@@ -233,7 +251,7 @@ final class HologramRig {
         var angleDeg: Float = 180
         var charHeightMM: Float = 0
         var autoHeightMM: Float = 0
-        var pEff: Float = 0.5
+        var pEff: Float = HologramRig.defaultPPos
         var padPct: Float = 100
         var wEff: Float = 0
         var lowerEyeHeightMM: Float = 0
@@ -250,6 +268,8 @@ final class HologramRig {
         var hasFrame = false
         /// 実際に使っているパネル寸法（mm）：幅・上・下。レイアウトを取り込むまでは nil
         var panelMM: SIMD3<Float>?
+        /// 比べる場面で、棒の先が映っているパネル（画面の外なら nil）
+        var compareTipPanel: ComparePanel?
     }
     private let snapLock = NSLock()
     private var _snap = Snapshot()
@@ -277,6 +297,34 @@ final class HologramRig {
         key.position = SCNVector3(0.05, 0.15, 0.25)
         key.look(at: SCNVector3(0, 0, -0.1))
         scene.rootNode.addChildNode(key)
+        buildCompareNode()
+    }
+
+    /// 十字と仮想の棒を作る。原点は十字の中心、+y が下パネルの法線。棒の高さは update で合わせる
+    private func buildCompareNode() {
+        func material(_ c: UIColor) -> SCNMaterial {
+            let m = SCNMaterial()
+            m.lightingModel = .constant
+            m.diffuse.contents = c
+            return m
+        }
+        let crossMaterial = material(.white)
+        for (w, l) in [(CGFloat(0.016), CGFloat(0.0012)), (CGFloat(0.0012), CGFloat(0.016))] {
+            let arm = SCNBox(width: w, height: 0.0002, length: l, chamferRadius: 0)
+            arm.materials = [crossMaterial]
+            let n = SCNNode(geometry: arm)
+            n.simdPosition = SIMD3(0, 0.0005, 0)
+            compareNode.addChildNode(n)
+        }
+        let rod = SCNCylinder(radius: 0.0008, height: 1)
+        rod.materials = [material(.orange)]
+        compareRod.geometry = rod
+        compareNode.addChildNode(compareRod)
+        let tip = SCNSphere(radius: 0.0025)
+        tip.materials = [material(.yellow)]
+        compareTip.geometry = tip
+        compareNode.addChildNode(compareTip)
+        compareNode.isHidden = true
     }
 
     /// main から渡された寸法とプロファイルを、描画スレッドのフレーム冒頭で取り込む。変わったときだけ作り直す。
@@ -586,6 +634,8 @@ final class HologramRig {
 
         standNode.removeFromParentNode()
         floorFrame.addChildNode(standNode)
+        compareNode.removeFromParentNode()
+        floorFrame.addChildNode(compareNode)
         padNode.removeFromParentNode()
         padNode.childNodes.forEach { $0.removeFromParentNode() }
         standNode.addChildNode(padNode)
@@ -826,9 +876,53 @@ final class HologramRig {
 
     /// 先読みのずれ量の長さの上限（m）。顔の再検出で速度が跳ねたときの行き過ぎを抑える
     static let predictionMaxOffset: Float = 0.010
-    private static func clampedLead(_ lead: SIMD3<Float>) -> SIMD3<Float> {
+    /// 先読みを長くしたときに上限で頭打ちにならないよう、この速さ（m/s）までは先読みの分だけ上限を広げる。
+    /// 先読み 40ms 以下では、上限は従来の 10mm のまま
+    static let predictionMaxSpeed: Float = 0.25
+    static func predictionLimit(seconds: Float) -> Float {
+        max(predictionMaxOffset, seconds * predictionMaxSpeed)
+    }
+    private static func clampedLead(_ lead: SIMD3<Float>, seconds: Float) -> SIMD3<Float> {
         let len = simd_length(lead)
-        return len > predictionMaxOffset ? lead * (predictionMaxOffset / len) : lead
+        let limit = predictionLimit(seconds: seconds)
+        return len > limit ? lead * (limit / len) : lead
+    }
+
+    // MARK: - 遅れの計測（ARFrame の時刻 → 描画）
+
+    private static let latencyWindow = 120
+    private let latencyLock = NSLock()
+    private var latencyPendingFrame: TimeInterval?
+    private var latencySamples: [Double] = []
+    private var latencyNext = 0
+
+    /// このフレームで使った ARFrame の時刻を渡す。顔が見えていないときは nil で、平均を捨てる
+    private func setLatencyFrame(_ frameTime: TimeInterval?) {
+        latencyLock.lock(); defer { latencyLock.unlock() }
+        latencyPendingFrame = frameTime
+        if frameTime == nil { latencySamples.removeAll(); latencyNext = 0 }
+    }
+
+    /// 描画の命令を出し終えた時点で呼ぶ。1 回の更新につき 1 サンプルだけ数える
+    func noteRendered(now: TimeInterval) {
+        latencyLock.lock(); defer { latencyLock.unlock() }
+        guard let frameTime = latencyPendingFrame else { return }
+        latencyPendingFrame = nil
+        let ms = (now - frameTime) * 1000
+        guard ms.isFinite, ms >= 0, ms < 1000 else { return }
+        if latencySamples.count < Self.latencyWindow {
+            latencySamples.append(ms)
+        } else {
+            latencySamples[latencyNext] = ms
+            latencyNext = (latencyNext + 1) % Self.latencyWindow
+        }
+    }
+
+    /// 直近 120 フレームの平均の遅れ（ms）。顔が見えていないときは nil
+    var averageLatencyMS: Double? {
+        latencyLock.lock(); defer { latencyLock.unlock() }
+        guard !latencySamples.isEmpty else { return nil }
+        return latencySamples.reduce(0, +) / Double(latencySamples.count)
     }
 
     /// 視点・折り角度を平滑化し、床の枠と2つのカメラの投影を更新する。
@@ -854,12 +948,16 @@ final class HologramRig {
         // 顔が見えていれば、カメラ相対の目の位置にカメラの位置（機種プロファイル）を足す。
         // 見えていなければドラッグ（基準の目の位置からのずれ）。
         let target: SIMD3<Float>
+        var usedFrameTime: TimeInterval?
         if let tracker, tracker.faceActive {
             // 絶対位置のみ（手順4）：目の位置 = カメラの位置（機種プロファイル）+ 軸対応を適用した目位置。
             // ホーム基準と視差ゲインは廃止。目の絶対位置のずれは機種プロファイル側で吸収する。
-            let candidate = cameraPosition + tracker.mappedHead
+            // 距離の倍率は、カメラから見た位置の x・y・z に掛ける（カメラ位置を足す前）
+            let sample = tracker.eyeSample
+            let candidate = cameraPosition + sample.position * distanceScale
             if candidate.x.isFinite && candidate.y.isFinite && candidate.z.isFinite {
                 target = candidate
+                usedFrameTime = sample.frameTime
                 lastFaceTarget = candidate
                 faceLostSince = nil
             } else {
@@ -881,9 +979,11 @@ final class HologramRig {
             target = nominalEye + SIMD3<Float>(man.x, man.y, 0)
         }
         lastValidTarget = target
+        setLatencyFrame(usedFrameTime)
         // 平滑化は 1€ フィルタ（手順5）。さらに速度×先読み時間だけ先の位置を出して表示までの遅れを埋める
         let filtered = eyeFilter.filter(target, dt: Float(dt), minCutoff: oeMinCutoff, beta: oeBeta, dCutoff: 1.0)
-        let predicted = filtered + Self.clampedLead(eyeFilter.dxHat * oePred)
+        let predictionSeconds = oePred
+        let predicted = filtered + Self.clampedLead(eyeFilter.dxHat * predictionSeconds, seconds: predictionSeconds)
         let eye = SIMD3<Float>(predicted.x, predicted.y, max(predicted.z, 0.1))
 
         let lower = lowerPlane(angle: th)
@@ -926,7 +1026,7 @@ final class HologramRig {
             smoothedPW = nil
         }
         let pwNow = smoothedPW
-        let pBase = pAuto ? (pwNow?.p ?? 0.5) : pPos
+        let pBase = pAuto ? (pwNow?.p ?? Self.defaultPPos) : pPos
         let pEff = min(max(pBase, 0), pMax)
         let distFold = (1 - pEff) * lowerH    // 下パネルの折り目側の端から手前方向への距離（負＝端より奥）
         standNode.simdPosition = SIMD3(0, 0, lowerEdge + distFold - frameZ0)
@@ -939,12 +1039,13 @@ final class HologramRig {
         wallFrameNode.simdPosition = SIMD3(0, frameBottom + wallFrameH / 2, -recess + 0.0005)
 
         // 位置合わせマーカーの表示切り替え（パネルのトグル）
-        let sm = showMarkers
+        let compare = compareMode
+        let sm = showMarkers && !compare
         for n in markerNodes where n.isHidden == sm { n.isHidden = !sm }
         for m in upperEdgeMarkers { m.node.simdPosition.y = foldHalfGap + (m.atTop ? upperH : 0) }
 
         // 格子：部屋の角（壁側は yC、床側は sC）を原点に等間隔で並べる。角を共有するので折り目でつながる
-        let gs = showGrid
+        let gs = showGrid || compare
         for g in gridWallH {
             g.node.simdPosition = SIMD3(0, yC + g.k * gridStep, -recess + 0.0006)
             g.node.isHidden = !gs
@@ -990,9 +1091,29 @@ final class HologramRig {
         padNode.simdScale = SIMD3(hs, 1, hs)   // 台座の半径も身長に連動（厚みは変えない）
 
         // G4 の確認の場面：部屋とキャラを隠して箱だけにする
-        let check = checkMode
-        if worldNode.isHidden != check { worldNode.isHidden = check }
+        let check = checkMode && !compare
+        let hideWorld = check || compare
+        if worldNode.isHidden != hideWorld { worldNode.isHidden = hideWorld }
         if floorFrame.isHidden != check { floorFrame.isHidden = check }
+        // 比べる場面：床の面・人形を隠し、格子と十字と棒だけを残す
+        if floorNode.isHidden != compare { floorNode.isHidden = compare }
+        if floorShade.isHidden != compare { floorShade.isHidden = compare }
+        if standNode.isHidden != compare { standNode.isHidden = compare }
+        for l in floorLines where l.node.isHidden != compare { l.node.isHidden = compare }
+        if compareNode.isHidden == compare { compareNode.isHidden = !compare }
+        var compareTipPanel: ComparePanel?
+        if compare {
+            let rodH = compareRodHeight
+            let crossZ = lowerH / 2 - Self.compareCrossFromEdge
+            compareNode.simdPosition = SIMD3(0, 0, crossZ)
+            compareRod.simdPosition = SIMD3(0, rodH / 2, 0)
+            compareRod.simdScale = SIMD3(1, rodH, 1)
+            compareTip.simdPosition = SIMD3(0, rodH, 0)
+            let tipWorld = lower.center + lower.d * crossZ + lower.normal * rodH
+            let m = windowMargins(tipWorld, eye: eye, d: lower.d, n: lower.normal)
+            if let u = m.upper, u >= 0 { compareTipPanel = .upper }
+            else if let l = m.lower, l >= 0 { compareTipPanel = .lower }
+        }
         if checkBoxNode.isHidden == check { checkBoxNode.isHidden = !check }
         if check {
             if checkBoxSize != SIMD2(width, upperH) { rebuildCheckBox() }
@@ -1056,7 +1177,8 @@ final class HologramRig {
                          foldGapMM: foldHalfGap * 2 * 1000,
                          materialFound: materialFound, materialTotal: materialTotal,
                          hasFrame: true,
-                         panelMM: layoutApplied ? SIMD3(width, upperH, lowerH) * 1000 : nil)
+                         panelMM: layoutApplied ? SIMD3(width, upperH, lowerH) * 1000 : nil,
+                         compareTipPanel: compareTipPanel)
         snapLock.unlock()
     }
 
@@ -1149,6 +1271,8 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
                 .store(in: &cancellables)
             diagnostics.$oePredMS.sink { [weak self] v in self?.rig.setOneEuroPred(Float(v) / 1000) }
                 .store(in: &cancellables)
+            diagnostics.$distanceScale.sink { [weak self] v in self?.rig.setDistanceScale(Float(v)) }
+                .store(in: &cancellables)
             diagnostics.$pAuto.sink { [weak self] v in self?.rig.setPAuto(v) }
                 .store(in: &cancellables)
             diagnostics.$pwRecords.sink { [weak self] recs in
@@ -1222,6 +1346,12 @@ final class HologramContainerView: UIView, SCNSceneRendererDelegate {
 
         layoutFold = fold
         pushLayout()
+    }
+
+    /// 遅れの計測：上の画面の描画命令を出し終えた時点を「描画」とする（上下で二重に数えない）
+    func renderer(_ renderer: SCNSceneRenderer, didRenderScene scene: SCNScene, atTime time: TimeInterval) {
+        guard renderer === upperView else { return }
+        rig.noteRendered(now: CACurrentMediaTime())
     }
 
     /// 折り目の位置（layoutSubviews で決めた値）。main 専用

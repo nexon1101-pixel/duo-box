@@ -9,15 +9,29 @@ final class HologramDiagnostics: ObservableObject {
     /// 調整値：壁を奥へ下げる量（mm、初期値 30）と、身長の倍率（検証用、初期値 1）
     @Published var wallRecessMM: Double = 30 { didSet { saveTunes() } }
     @Published var heightScale: Double = 1 { didSet { saveTunes() } }
-    /// 前後位置 p：0＝手前の端、1＝折り目、1超＝床の角まで。既定 0.5
-    @Published var pPos: Double = 0.5 { didSet { saveTunes() } }
+    /// 前後位置 p：0＝手前の端、1＝折り目、1超＝床の角まで。既定は HologramRig.defaultPPos
+    @Published var pPos: Double = Double(HologramRig.defaultPPos) { didSet { saveTunes() } }
     @Published var pAuto: Bool = true { didSet { saveTunes() } }
     @Published var wAuto: Bool = true { didSet { saveTunes() } }
     @Published var wLean: Double = 0 { didSet { saveTunes() } }
     /// 1€ フィルタの調整値（手順5）：最小カットオフ (Hz)、速度係数 β、先読み (ms)
     @Published var oeMinCutoff: Double = 1.2 { didSet { saveTunes() } }
     @Published var oeBeta: Double = 0.8 { didSet { saveTunes() } }
-    @Published var oePredMS: Double = 20 { didSet { saveTunes() } }
+    /// 先読みは 1 つの値。調整値（hologram.tunes.v1）に加えて機種ごとにも保存し、起動時は機種ごとの値を優先する
+    @Published var oePredMS: Double = 20 {
+        didSet {
+            saveTunes()
+            guard tunesReady else { return }
+            HologramCalibrationStore.savePredictionMS(oePredMS, machineID: machineID)
+        }
+    }
+    /// 距離の倍率（機種ごとに保存）。カメラから見た目の位置の x・y・z に掛ける
+    @Published var distanceScale: Double = 1 {
+        didSet {
+            guard tunesReady else { return }
+            HologramCalibrationStore.saveDistanceScale(distanceScale, machineID: machineID)
+        }
+    }
     /// 実寸計測（パネル①）のクレカの棒の長さ (pt)
     @Published var rulerBarLength: Double = 200 { didSet { saveTunes() } }
     /// 角度ごとの p・w の記録（UserDefaults に保存）
@@ -33,6 +47,7 @@ final class HologramDiagnostics: ObservableObject {
     private static let tunesKey = "hologram.tunes.v1"
     /// init の読み込みが終わるまで保存しない
     private var tunesReady = false
+    private let machineID = HologramDeviceProfile.readMachineID()
 
     init() {
         let raw = UserDefaults.standard.array(forKey: Self.pwKey) as? [[Double]] ?? []
@@ -53,7 +68,9 @@ final class HologramDiagnostics: ObservableObject {
         if let v = number("wLean") { wLean = v }
         if let v = number("oeMinCutoff") { oeMinCutoff = v }
         if let v = number("oeBeta") { oeBeta = v }
-        if let v = number("oePredMS") { oePredMS = v }
+        if let v = number("oePredMS") { oePredMS = min(max(v, 0), 120) }
+        if let v = HologramCalibrationStore.predictionMS(machineID: machineID) { oePredMS = v }
+        distanceScale = HologramCalibrationStore.distanceScale(machineID: machineID)
         if let v = number("rulerBarLength") { rulerBarLength = v }
         if let v = t["showMarkers"] as? Bool { showMarkers = v }
         if let v = t["showGrid"] as? Bool { showGrid = v }
@@ -118,11 +135,11 @@ final class HologramDiagnostics: ObservableObject {
     /// G4 の箱の確認の答え（未回答は nil）
     @Published var boxCheck = HologramCalibrationStore.boxCheck(machineID: HologramDeviceProfile.readMachineID())
 
-    /// 調整値を既定に戻す。軸対応・カメラ位置・角度ごとの記録・クレカの棒（実測値）は消さない
+    /// 調整値を既定に戻す。軸対応・カメラ位置・距離の倍率・角度ごとの記録・クレカの棒（実測値）は消さない
     func resetTunes() {
         wallRecessMM = 30
         heightScale = 1
-        pPos = 0.5
+        pPos = Double(HologramRig.defaultPPos)
         pAuto = true
         wAuto = true
         wLean = 0
@@ -161,6 +178,7 @@ struct HologramDebugPanel: View {
     @ObservedObject var tracker: HeadTracker
     @ObservedObject var diagnostics: HologramDiagnostics
     var onCalibrate: () -> Void
+    var onCompare: () -> Void
     var onClose: () -> Void
 
     /// クレジットカード（ISO/IEC 7810 ID-1）の長辺
@@ -185,6 +203,8 @@ struct HologramDebugPanel: View {
                     .buttonStyle(.borderedProminent)
                 Button("調整値を既定に戻す") { confirmReset = true }
                     .font(.caption)
+                distanceSection
+                Divider()
                 rulerSection
                 Divider()
                 deviceSection
@@ -213,13 +233,42 @@ struct HologramDebugPanel: View {
             Button("戻す", role: .destructive) { diagnostics.resetTunes() }
             Button("やめる", role: .cancel) {}
         } message: {
-            Text("壁の下げ量 30mm、p・w 自動、身長 ×1.0 などに戻します。キャリブレーションの結果、角度ごとの記録、クレカの棒は消えません")
+            Text("壁の下げ量 30mm、p・w 自動（p の既定 1.0）、身長 ×1.0、先読み 20ms などに戻します。キャリブレーションの結果、距離の倍率、角度ごとの記録、クレカの棒は消えません")
         }
         .foregroundStyle(.white)
         .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
         .padding(.horizontal, 10)
         .padding(.top, 50)
         .padding(.bottom, 80)
+    }
+
+    // MARK: 距離と遅れ
+
+    private var distanceSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("距離と遅れの確認").font(.subheadline.bold())
+            TimelineView(.periodic(from: .now, by: 0.2)) { _ in
+                let active = tracker.faceActive
+                let rawCM = Double(tracker.rawDistance) * 100
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(active ? String(format: "%.1f cm", rawCM) : "— cm")
+                        .font(.system(size: 44, weight: .bold, design: .monospaced))
+                    Text("ARKit の目までの距離（倍率を掛ける前）")
+                        .font(.caption2).foregroundStyle(.white.opacity(0.7))
+                    row("倍率を掛けた距離", active ? String(format: "%.1f cm", rawCM * diagnostics.distanceScale) : "—")
+                    row("描画までの遅れ（平均）", diagnostics.rig?.averageLatencyMS.map { String(format: "%.1f ms", $0) } ?? "—")
+                }
+                .font(.system(.footnote, design: .monospaced))
+            }
+            Text("距離の倍率: ×\(String(format: "%.2f", diagnostics.distanceScale))（機種ごとに保存）")
+                .font(.caption)
+            Slider(value: $diagnostics.distanceScale, in: HologramCalibrationStore.distanceScaleRange,
+                   step: HologramCalibrationStore.distanceScaleStep)
+            Button("本物の物と比べる", action: onCompare)
+                .font(.caption)
+            Text("遅れは ARKit のフレームの時刻から描画の命令を出し終えるまで。画面に光るまでの時間は含まない")
+                .font(.caption2).foregroundStyle(.white.opacity(0.7))
+        }
     }
 
     // MARK: 実寸計測
@@ -342,7 +391,7 @@ struct HologramDebugPanel: View {
             Text("身長の倍率（自動で決めた身長に掛かる）: ×\(String(format: "%.2f", diagnostics.heightScale))")
                 .font(.caption)
             Slider(value: $diagnostics.heightScale, in: 0.5...2, step: 0.05)
-            Toggle("前後位置 p は角度で自動（既定 0.5／記録があれば補間）", isOn: $diagnostics.pAuto)
+            Toggle("前後位置 p は角度で自動（既定 \(String(format: "%.1f", HologramRig.defaultPPos))／記録があれば補間）", isOn: $diagnostics.pAuto)
                 .font(.caption)
             Text("前後位置 p（手動）: \(String(format: "%.2f", diagnostics.pPos))（0＝手前の端、1＝折り目、1超＝床の角まで）")
                 .font(.caption)
@@ -460,7 +509,7 @@ struct HologramDebugPanel: View {
             Slider(value: $diagnostics.oeBeta, in: 0...3, step: 0.05)
             Text("先読み: \(String(format: "%.0f", diagnostics.oePredMS)) ms（表示までの遅れの埋め合わせ）")
                 .font(.caption)
-            Slider(value: $diagnostics.oePredMS, in: 0...50, step: 1)
+            Slider(value: $diagnostics.oePredMS, in: HologramCalibrationStore.predictionRangeMS, step: 1)
 
         }
     }
@@ -602,7 +651,7 @@ struct HologramDebugPanel: View {
                     }
                 }
             }
-            Text("記録できる角度は実機では約15°〜145°と全開（180°）。記録の間は p と w の既定値を角度で線形補間し、範囲の外は両端の記録の値を保つ（記録が1件なら全角度でその値）。記録がないときは既定（p=0.5、w は角度の smoothstep）")
+            Text("記録できる角度は実機では約15°〜145°と全開（180°）。記録の間は p と w の既定値を角度で線形補間し、範囲の外は両端の記録の値を保つ（記録が1件なら全角度でその値）。記録がないときは既定（p=\(String(format: "%.1f", HologramRig.defaultPPos))、w は角度の smoothstep）")
                 .font(.caption2).foregroundStyle(.white.opacity(0.7))
         }
     }
@@ -729,7 +778,9 @@ struct HologramDebugPanel: View {
         lines.append("最小カットオフ: \(num(d.oeMinCutoff, 2)) Hz")
         lines.append("β: \(num(d.oeBeta, 2))")
         lines.append("先読み: \(num(d.oePredMS, 0)) ms")
-        lines.append("先読み上限 predictionMaxOffset: \(num(HologramRig.predictionMaxOffset * 1000)) mm")
+        lines.append("先読み上限: \(num(HologramRig.predictionLimit(seconds: Float(d.oePredMS / 1000)) * 1000)) mm")
+        lines.append("距離の倍率: ×\(num(d.distanceScale, 2))")
+        lines.append("描画までの遅れ（平均）: \(num(d.rig?.averageLatencyMS, 1)) ms")
 
         lines.append("")
         lines.append("【定数】")

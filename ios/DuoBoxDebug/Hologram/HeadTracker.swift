@@ -29,6 +29,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
     private var _wrongSignCount = 0            // 距離が 0 以下で捨てた回数
     private var _faceActive = false
     private var _lastFaceTime: TimeInterval?   // 最後に顔を捉えた時刻（CACurrentMediaTime）
+    private var _frameTime: TimeInterval = 0   // いまの目の位置を測った ARFrame の時刻
 
     var head: SIMD3<Float> { lock.lock(); defer { lock.unlock() }; return _head }
     /// 切り分け表示用：丸める前の距離 −z（m、符号つき）。丸めた後は head.z
@@ -146,6 +147,12 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
 
     /// 軸対応を適用した目の位置（カメラ相対、シーン軸）。シーン側はこれにカメラの位置を足すだけ。
     var mappedHead: SIMD3<Float> { lock.lock(); defer { lock.unlock() }; return lockedAxisMap.apply(_head) }
+
+    /// 描画用：軸対応を適用した目の位置と、それを測った ARFrame の時刻を同時に読む（遅れの計測に使う）
+    var eyeSample: (position: SIMD3<Float>, frameTime: TimeInterval) {
+        lock.lock(); defer { lock.unlock() }
+        return (lockedAxisMap.apply(_head), _frameTime)
+    }
 
     /// 最後に顔を捉えてからの秒数。まだ一度も捉えていなければ nil。デバッグ表示用。
     var secondsSinceFace: Int? {
@@ -421,6 +428,7 @@ final class HeadTracker: NSObject, ObservableObject, ARSessionDelegate {
             return
         }
         _head = SIMD3<Float>(turned.x, turned.y, min(max(rawDist, 0.15), 0.9))
+        _frameTime = frame.timestamp
         _faceActive = true
         _lastFaceTime = CACurrentMediaTime()
         lock.unlock()
