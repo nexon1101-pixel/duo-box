@@ -16,6 +16,8 @@ struct HologramView: View {
     @State private var showCompare = false
     /// L 字の確認の箱（計測パネルから単独で開く）
     @State private var showLBox = false
+    /// 箱の確認の段の間はホームボタンを隠す（下パネルが透明になり、箱に重なるため）
+    @State private var hideHomeButton = false
 
     /// この角度未満で「画面を開いてください」を出し、この角度以上で消す。間は前の状態を保つ
     static let openPromptShowBelowDeg: Double = 60
@@ -109,22 +111,25 @@ struct HologramView: View {
             }
 
             // 本番 RootView と同じ見た目の戻るボタン
-            Button(action: onExit) {
-                Image(systemName: "house.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 48, height: 48)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay(Circle().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
-                    .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+            if !hideHomeButton {
+                Button(action: onExit) {
+                    Image(systemName: "house.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 48, height: 48)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+                }
+                .accessibilityLabel("ホームへ戻る")
+                .padding(.trailing, 20)
+                .padding(.bottom, 20)
             }
-            .accessibilityLabel("ホームへ戻る")
-            .padding(.trailing, 20)
-            .padding(.bottom, 20)
 
             if showCalibration {
                 HologramCalibrationFlow(tracker: tracker, diagnostics: diagnostics,
-                                        onClose: { showCalibration = false })
+                                        onClose: { showCalibration = false },
+                                        onHomeButtonHidden: { hideHomeButton = $0 })
             }
 
             if showCompare {

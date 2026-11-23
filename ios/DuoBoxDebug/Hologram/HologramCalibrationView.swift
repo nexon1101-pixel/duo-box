@@ -239,6 +239,8 @@ struct HologramCalibrationFlow: View {
     @ObservedObject var tracker: HeadTracker
     @ObservedObject var diagnostics: HologramDiagnostics
     var onClose: () -> Void
+    /// 箱の確認の段の間、ホームボタンを隠すかどうか
+    var onHomeButtonHidden: (Bool) -> Void
 
     private enum Step { case orientation, camera, axis, box, compare }
     @State private var step = Step.orientation
@@ -258,57 +260,109 @@ struct HologramCalibrationFlow: View {
                                         onNext: { step = .box }, onFinish: onClose)
         case .box:
             HologramBoxCheckView(diagnostics: diagnostics,
-                                 onRetry: { step = .camera }, onNext: { step = .compare }, onFinish: onClose)
+                                 onRetry: { step = .camera }, onNext: { step = .compare }, onFinish: onClose,
+                                 onHomeButtonHidden: onHomeButtonHidden)
         case .compare:
             HologramCompareView(tracker: tracker, diagnostics: diagnostics, onFinish: onClose)
         }
     }
 }
 
-/// G4：画面の奥 30mm の L 字の格子の箱で、最後の確認をする。上パネルは絵を見せるため何も重ねない。
+/// G4：画面の奥 30mm の L 字の格子の箱で、最後の確認をする。
+/// 箱全体が見えるよう、質問と回答は下パネルの手前の端の細い帯にまとめ、帯のタップで隠したり出したりする
 struct HologramBoxCheckView: View {
     @ObservedObject var diagnostics: HologramDiagnostics
     var onRetry: () -> Void
     /// 「はい」のあと、本物の物と比べる場面へ進む
     var onNext: () -> Void
     var onFinish: () -> Void
+    /// この段の間、ホームボタンを隠すかどうかを親へ伝える（箱に重ならないように）
+    var onHomeButtonHidden: (Bool) -> Void
     @State private var answeredNo = false
+    @State private var isBandHidden = false
 
     var body: some View {
-        GeometryReader { geo in
-            let profileFold = diagnostics.cameraProfile.foldYPt
-            let fold = profileFold > 0 ? profileFold : geo.size.height / 2
-            ScrollView {
-                VStack(spacing: 12) {
-                    if answeredNo {
-                        Text("カメラ位置と軸の向きを、もう一度合わせてください")
-                            .font(.headline)
-                            .multilineTextAlignment(.center)
-                        HStack(spacing: 24) {
-                            Button("閉じる", action: onFinish)
-                            Button("カメラ位置からやり直す", action: onRetry).bold()
-                        }
-                    } else {
-                        Text("片目を閉じて、頭をゆっくり左右に動かしてください。箱が画面の奥に止まって見えますか")
-                            .font(.headline)
-                            .multilineTextAlignment(.center)
-                        HStack(spacing: 32) {
-                            Button("いいえ") { answer(false) }
-                            Button("はい") { answer(true) }.bold()
-                        }
-                        .font(.title3)
-                    }
-                }
-                .padding(14)
+        ZStack(alignment: .bottom) {
+            // 帯の外の下パネルは透明にして箱を見せる。タッチは今までどおりシーンへ通さない
+            GeometryReader { geo in
+                let profileFold = diagnostics.cameraProfile.foldYPt
+                let fold = profileFold > 0 ? profileFold : geo.size.height / 2
+                Color.clear
+                    .contentShape(Rectangle())
+                    .frame(width: geo.size.width, height: max(geo.size.height - fold, 0))
+                    .offset(y: fold)
             }
-            .frame(width: geo.size.width, height: max(geo.size.height - fold, 0))
-            .background(Color.black)
-            .offset(y: fold)
+            .ignoresSafeArea()
+
+            if isBandHidden {
+                showBandHandle
+            } else {
+                answerBand
+            }
         }
-        .ignoresSafeArea()
         .foregroundStyle(.white)
-        .onAppear { diagnostics.rig?.setCheckMode(true) }
-        .onDisappear { diagnostics.rig?.setCheckMode(false) }
+        .onAppear {
+            diagnostics.rig?.setCheckMode(true)
+            onHomeButtonHidden(true)
+        }
+        .onDisappear {
+            diagnostics.rig?.setCheckMode(false)
+            onHomeButtonHidden(false)
+        }
+    }
+
+    /// 質問と回答の帯。ボタン以外の場所をタップすると隠れる
+    private var answerBand: some View {
+        HStack(spacing: 10) {
+            Text(answeredNo ? "カメラ位置と軸を合わせ直してください" : "片目で頭を左右に：箱は奥に止まって見える？")
+                .font(.footnote.bold())
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if answeredNo {
+                bandButton("閉じる", action: onFinish)
+                bandButton("やり直す", isBold: true, action: onRetry)
+                    .accessibilityLabel("カメラ位置からやり直す")
+            } else {
+                bandButton("いいえ") { answer(false) }
+                bandButton("はい", isBold: true) { answer(true) }
+            }
+            Button { isBandHidden = true } label: {
+                Image(systemName: "chevron.down")
+                    .frame(width: 32, height: 44)
+            }
+            .accessibilityLabel("質問を隠す")
+        }
+        .padding(.horizontal, 12)
+        .background(Color.black.opacity(0.55).ignoresSafeArea(edges: .bottom))
+        .contentShape(Rectangle())
+        .onTapGesture { isBandHidden = true }
+    }
+
+    /// 帯を隠している間の小さな取っ手。押せる範囲は帯と同じ高さにする
+    private var showBandHandle: some View {
+        Button { isBandHidden = false } label: {
+            Image(systemName: "chevron.up")
+                .font(.caption2.bold())
+                .frame(width: 56, height: 18)
+                .background(Color.black.opacity(0.4), in: Capsule())
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .bottom)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("質問を出す")
+    }
+
+    private func bandButton(_ title: String, isBold: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.subheadline)
+                .fontWeight(isBold ? .bold : .regular)
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 6)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
     }
 
     private func answer(_ yes: Bool) {
