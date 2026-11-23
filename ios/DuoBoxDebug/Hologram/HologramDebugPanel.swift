@@ -11,7 +11,7 @@ final class HologramDiagnostics: ObservableObject {
     @Published var wallRecessMM: Double = 30 { didSet { saveTunes() } }
     /// 床を下パネルのガラスより奥へ下げる量（mm）。0 だと下の画面は奥行きのない絵になる
     @Published var floorRecessMM: Double = 25 { didSet { saveTunes() } }
-    /// 踊る（立体感の確認用。保存しない）
+    /// 人形をゆっくり回す（立体感の確認用。保存しない）
     @Published var dance = false
     @Published var heightScale: Double = 1 { didSet { saveTunes() } }
     /// 前後位置 p：0＝手前の端、1＝折り目、1超＝床の角まで。既定は HologramRig.defaultPPos

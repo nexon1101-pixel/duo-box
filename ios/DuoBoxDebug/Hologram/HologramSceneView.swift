@@ -990,43 +990,33 @@ final class HologramRig {
         return latencySamples.reduce(0, +) / Double(latencySamples.count)
     }
 
-    // MARK: - 踊り（立体感の確認用）
+    // MARK: - ターンテーブル（立体感の確認用）
 
-    /// 踊りの拍（1 分あたり）。体を左右に回す動きがあると、奥行きが分かりやすい
-    static let danceBPM: Double = 116
-    private var danceStart: TimeInterval?
-    private var danceWeight: Float = 0
+    /// 一回りにかける秒数。モデルは骨のない1つの形（amekoro_static）なので、体を弾ませる踊りは
+    /// 棒が跳ねるようにしか見えなかった。フィギュアを回転台に載せたように、ゆっくり回すだけにする
+    static let turntableSecondsPerTurn: Double = 12
+    private var turntableAngle: Float = 0
+    private var turntableSpeed: Float = 0
+    private var turntableLastTime: TimeInterval?
 
-    /// 人形の体だけを動かす（台座と立ち位置はそのまま）。オン・オフは 0.4 秒かけて混ぜ、急に止まらない
+    /// 人形だけを縦の軸まわりに回す（台座と立ち位置はそのまま）。回り始めと止まるときは 0.8 秒かけて速さを変える
     private func applyDance(time: TimeInterval, height h: Float) {
         let on = dance
-        if on, danceStart == nil { danceStart = time }
-        let step = Float(1.0 / 60 / 0.4)
-        danceWeight = min(max(danceWeight + (on ? step : -step), 0), 1)
-        guard danceWeight > 0, let start = danceStart else {
-            danceStart = nil
-            if idleNode.simdPosition != .zero { idleNode.simdPosition = .zero }
-            idleNode.simdOrientation = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
-            return
+        let dt = Float(min(max(time - (turntableLastTime ?? time), 0), 0.1))
+        turntableLastTime = time
+        let fullSpeed = Float(2 * Double.pi / Self.turntableSecondsPerTurn)
+        let accel = fullSpeed / 0.8
+        if on { turntableSpeed = min(turntableSpeed + accel * dt, fullSpeed) }
+        else { turntableSpeed = max(turntableSpeed - accel * dt, 0) }
+        turntableAngle = (turntableAngle + turntableSpeed * dt).truncatingRemainder(dividingBy: 2 * .pi)
+        // 止まったら、近い向き（正面）へゆっくり戻す
+        if !on && turntableSpeed == 0 && turntableAngle != 0 {
+            let back = turntableAngle > .pi ? turntableAngle - 2 * .pi : turntableAngle
+            let next = back * max(1 - dt * 3, 0)
+            turntableAngle = abs(next) < 0.001 ? 0 : (next < 0 ? next + 2 * .pi : next)
         }
-        let t = time - start
-        let beat = t * Self.danceBPM / 60                 // 拍の数
-        let phase = Float(beat * .pi)                       // 1 拍で π
-        let k = danceWeight
-        // 拍ごとに弾む・左右に揺れる・体を傾ける
-        let bounce = abs(sin(phase)) * 0.06 * h
-        let side = sin(phase / 2) * 0.12 * h
-        let roll = sin(phase / 2) * 0.14
-        // ゆっくり左右に向きを変え、16 拍に 1 回（最後の 2 拍で）くるっと一回転する（回ると奥行きが分かりやすい）
-        let bar = beat.truncatingRemainder(dividingBy: 16)
-        var yaw = sin(Float(beat * .pi / 4)) * 0.7
-        if bar >= 14 {
-            let u = Float((bar - 14) / 2)
-            yaw += u * u * (3 - 2 * u) * 2 * .pi
-        }
-        idleNode.simdPosition = SIMD3<Float>(side, bounce, 0) * k
-        idleNode.simdOrientation = simd_quatf(angle: yaw * k, axis: SIMD3<Float>(0, 1, 0))
-            * simd_quatf(angle: roll * k, axis: SIMD3<Float>(0, 0, 1))
+        if idleNode.simdPosition != .zero { idleNode.simdPosition = .zero }
+        idleNode.simdOrientation = simd_quatf(angle: turntableAngle, axis: SIMD3<Float>(0, 1, 0))
     }
 
     /// 視点・折り角度を平滑化し、床の枠と2つのカメラの投影を更新する。

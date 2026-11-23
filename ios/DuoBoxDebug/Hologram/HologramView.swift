@@ -119,10 +119,10 @@ struct HologramView: View {
 
             // 本番 RootView と同じ見た目の戻るボタン
             // 比べる場面と L 字の箱では、下パネルの十字・棒・箱に重なるので出さない
-            // 踊る（立体感の確認用）。ホームボタンの左に置く
+            // 回転台のように人形をゆっくり回す（立体感の確認用）。ホームボタンの左に置く
             if !hideHomeButton && !showCompare && !showLBox {
                 Button { diagnostics.dance.toggle() } label: {
-                    Image(systemName: diagnostics.dance ? "pause.fill" : "music.note")
+                    Image(systemName: diagnostics.dance ? "pause.fill" : "arrow.triangle.2.circlepath")
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(width: 48, height: 48)
@@ -130,7 +130,7 @@ struct HologramView: View {
                         .overlay(Circle().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
                         .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
                 }
-                .accessibilityLabel(diagnostics.dance ? "踊りを止める" : "踊る")
+                .accessibilityLabel(diagnostics.dance ? "回すのを止める" : "ゆっくり回す")
                 .padding(.trailing, 20 + 48 + 14)
                 .padding(.bottom, 20)
             }

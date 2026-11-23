@@ -8,12 +8,17 @@ import UIKit
 struct HologramDeviceProfile: Equatable {
     /// 1pt の実寸（mm）。依頼者調べの iPhone Duo 実寸
     static let mmPerPoint: Double = 0.166
-    /// 折り目で上下の表示領域が離れる距離の上限（mm）。
-    /// 実機で決めるための定数。根拠は曲げ部分の最大幅の記事値
+    /// 曲げ部分の幅（mm）。記事値（曲げの空間は最も広い所で 3.85mm）を、曲げの直径とみなす
     static let foldGapMaxMM: Double = 3.85
-    /// 折り角（度）に対する離れの合計 G（mm）。180°で 0、90°以下で上限
+    /// 折り角（度）に対する、平らな2枚とみなしたときの離れの合計 G（mm）。
+    /// 画面は折り目で途切れず、半径 R の円弧に沿って曲がっている（画素は消えない）。
+    /// 2枚の平面が交わる角を基準にすると、円弧の端（平らな部分の始まり）は角から R·tan(φ/2)、
+    /// 画素の並びでは円弧の真ん中から R·φ/2 の位置にあるので、その差の2倍が G になる（φ＝180°−折り角）。
+    /// 以前の「90°で 3.85mm」の置き方は離れを大きく取りすぎて、折り目で絵が切れて見えていた（90°でも約 0.8mm）
     static func foldGapMM(angleDeg: Double) -> Double {
-        foldGapMaxMM * min(max((180 - angleDeg) / 90, 0), 1)
+        let r = foldGapMaxMM / 2
+        let phi = min(max((180 - angleDeg) * .pi / 180, 0), 170 * .pi / 180)
+        return 2 * r * (tan(phi / 2) - phi / 2)
     }
     /// ヒンジ軸から上下パネルそれぞれの折り目側の端までの距離（メートル）。G を半分ずつ振り分ける
     static func hingeToPanelEdge(angleDeg: Double) -> Float {
