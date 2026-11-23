@@ -149,7 +149,7 @@ struct HologramCalibrationFlow: View {
     @ObservedObject var diagnostics: HologramDiagnostics
     var onClose: () -> Void
 
-    private enum Step { case camera, axis }
+    private enum Step { case camera, axis, box }
     @State private var step = Step.camera
 
     var body: some View {
@@ -159,8 +159,63 @@ struct HologramCalibrationFlow: View {
                                     onDecide: { step = .axis },
                                     onCancel: onClose)
         case .axis:
-            HologramAxisCalibrationView(tracker: tracker, diagnostics: diagnostics, onFinish: onClose)
+            HologramAxisCalibrationView(tracker: tracker, diagnostics: diagnostics,
+                                        onNext: { step = .box }, onFinish: onClose)
+        case .box:
+            HologramBoxCheckView(diagnostics: diagnostics,
+                                 onRetry: { step = .camera }, onFinish: onClose)
         }
+    }
+}
+
+/// G4：画面の奥 30mm の格子の箱で、最後の確認をする。上パネルは絵を見せるため何も重ねない。
+struct HologramBoxCheckView: View {
+    @ObservedObject var diagnostics: HologramDiagnostics
+    var onRetry: () -> Void
+    var onFinish: () -> Void
+    @State private var answeredNo = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let profileFold = diagnostics.cameraProfile.foldYPt
+            let fold = profileFold > 0 ? profileFold : geo.size.height / 2
+            ScrollView {
+                VStack(spacing: 12) {
+                    if answeredNo {
+                        Text("カメラ位置と軸の向きを、もう一度合わせてください")
+                            .font(.headline)
+                            .multilineTextAlignment(.center)
+                        HStack(spacing: 24) {
+                            Button("閉じる", action: onFinish)
+                            Button("カメラ位置からやり直す", action: onRetry).bold()
+                        }
+                    } else {
+                        Text("片目を閉じて、頭をゆっくり左右に動かしてください。箱が画面の奥に止まって見えますか")
+                            .font(.headline)
+                            .multilineTextAlignment(.center)
+                        HStack(spacing: 32) {
+                            Button("いいえ") { answer(false) }
+                            Button("はい") { answer(true) }.bold()
+                        }
+                        .font(.title3)
+                    }
+                }
+                .padding(14)
+            }
+            .frame(width: geo.size.width, height: max(geo.size.height - fold, 0))
+            .background(Color.black)
+            .offset(y: fold)
+        }
+        .ignoresSafeArea()
+        .foregroundStyle(.white)
+        .onAppear { diagnostics.rig?.setCheckMode(true) }
+        .onDisappear { diagnostics.rig?.setCheckMode(false) }
+    }
+
+    private func answer(_ yes: Bool) {
+        HologramCalibrationStore.saveBoxCheck(yes, machineID: HologramDeviceProfile.readMachineID())
+        diagnostics.boxCheck = yes
+        if yes { onFinish() } else { answeredNo = true }
     }
 }
 
@@ -396,14 +451,17 @@ final class AxisCalibrationModel: ObservableObject {
 struct HologramAxisCalibrationView: View {
     @ObservedObject var tracker: HeadTracker
     @ObservedObject var diagnostics: HologramDiagnostics
+    var onNext: () -> Void
     var onFinish: () -> Void
 
     @StateObject private var feed = CalibrationFeed()
     @StateObject private var model: AxisCalibrationModel
 
-    init(tracker: HeadTracker, diagnostics: HologramDiagnostics, onFinish: @escaping () -> Void) {
+    init(tracker: HeadTracker, diagnostics: HologramDiagnostics,
+         onNext: @escaping () -> Void, onFinish: @escaping () -> Void) {
         self.tracker = tracker
         self.diagnostics = diagnostics
+        self.onNext = onNext
         self.onFinish = onFinish
         let p = diagnostics.cameraProfile
         _model = StateObject(wrappedValue: AxisCalibrationModel(belowTopMM: p.cameraBelowTopMM, rightMM: p.cameraRightMM))
@@ -498,7 +556,11 @@ struct HologramAxisCalibrationView: View {
                             .disabled(!model.canUseAsBase)
                     }
                     Button("最初から") { model.restart() }
-                    Button(model.stage == .verify ? "完了" : "やめる", action: onFinish).bold()
+                    if model.stage == .verify {
+                        Button("次へ（箱の確認）", action: onNext).bold()
+                    } else {
+                        Button("やめる", action: onFinish).bold()
+                    }
                 }
                 .font(.callout)
             }

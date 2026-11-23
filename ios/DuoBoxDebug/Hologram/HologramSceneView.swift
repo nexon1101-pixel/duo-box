@@ -118,6 +118,13 @@ final class HologramRig {
     private var _showMarkers = false        // 位置合わせマーカーの表示
     func setShowMarkers(_ v: Bool) { tuneLock.lock(); _showMarkers = v; tuneLock.unlock() }
     private var showMarkers: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _showMarkers }
+    /// G4 の確認の場面：部屋とキャラを隠し、画面の奥に格子の箱だけを出す
+    static let checkBoxDepth: Float = 0.030
+    private var _checkMode = false
+    func setCheckMode(_ v: Bool) { tuneLock.lock(); _checkMode = v; tuneLock.unlock() }
+    private var checkMode: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _checkMode }
+    private let checkBoxNode = SCNNode()
+    private var checkBoxSize: SIMD2<Float>?
     private var _showGrid = true            // 格子（床と壁）の表示
     func setShowGrid(_ v: Bool) { tuneLock.lock(); _showGrid = v; tuneLock.unlock() }
     private var showGrid: Bool { tuneLock.lock(); defer { tuneLock.unlock() }; return _showGrid }
@@ -251,6 +258,8 @@ final class HologramRig {
     init() {
         scene.rootNode.addChildNode(worldNode)
         scene.rootNode.addChildNode(floorFrame)
+        checkBoxNode.isHidden = true
+        scene.rootNode.addChildNode(checkBoxNode)
         upperCamera.camera = SCNCamera()
         lowerCamera.camera = SCNCamera()
         scene.rootNode.addChildNode(upperCamera)
@@ -678,6 +687,69 @@ final class HologramRig {
         charBuilt = true
     }
 
+    /// 上パネルの窓の奥に、10mm 格子の箱を作る。原点は箱の手前の下辺の中央（描画スレッド専用）
+    private func rebuildCheckBox() {
+        checkBoxNode.childNodes.forEach { $0.removeFromParentNode() }
+        let w = width, h = upperH, depth = Self.checkBoxDepth
+        func material(_ c: UIColor) -> SCNMaterial {
+            let m = SCNMaterial()
+            m.lightingModel = .constant
+            m.diffuse.contents = c
+            m.isDoubleSided = true
+            return m
+        }
+        let lineMaterial = material(UIColor(red: 0.55, green: 0.85, blue: 1.0, alpha: 1))
+        func add(_ geometry: SCNGeometry, _ position: SIMD3<Float>, euler: SIMD3<Float> = .zero) {
+            let n = SCNNode(geometry: geometry)
+            n.simdPosition = position
+            n.simdEulerAngles = euler
+            checkBoxNode.addChildNode(n)
+        }
+        func plane(_ pw: Float, _ ph: Float, _ c: UIColor) -> SCNPlane {
+            let p = SCNPlane(width: CGFloat(pw), height: CGFloat(ph))
+            p.materials = [material(c)]
+            return p
+        }
+        func bar(_ x: Float, _ y: Float, _ z: Float) -> SCNBox {
+            let b = SCNBox(width: CGFloat(x), height: CGFloat(y), length: CGFloat(z), chamferRadius: 0)
+            b.materials = [lineMaterial]
+            return b
+        }
+        let t: Float = 0.0005, step: Float = 0.010
+        // 奥の面と4つの側面
+        add(plane(w, h, UIColor(red: 0.10, green: 0.13, blue: 0.20, alpha: 1)), SIMD3(0, h / 2, -depth))
+        let side = UIColor(red: 0.15, green: 0.19, blue: 0.28, alpha: 1)
+        add(plane(depth, h, side), SIMD3(-w / 2, h / 2, -depth / 2), euler: SIMD3(0, .pi / 2, 0))
+        add(plane(depth, h, side), SIMD3(w / 2, h / 2, -depth / 2), euler: SIMD3(0, .pi / 2, 0))
+        add(plane(w, depth, side), SIMD3(0, h, -depth / 2), euler: SIMD3(.pi / 2, 0, 0))
+        add(plane(w, depth, side), SIMD3(0, 0, -depth / 2), euler: SIMD3(.pi / 2, 0, 0))
+        // 奥の面の格子と、側面を奥へ伸びる線
+        var x = -w / 2 + (w.truncatingRemainder(dividingBy: step)) / 2
+        while x <= w / 2 {
+            add(bar(t, h, t), SIMD3(x, h / 2, -depth + t))
+            add(bar(t, t, depth), SIMD3(x, t, -depth / 2))
+            add(bar(t, t, depth), SIMD3(x, h - t, -depth / 2))
+            x += step
+        }
+        var y = (h.truncatingRemainder(dividingBy: step)) / 2
+        while y <= h {
+            add(bar(w, t, t), SIMD3(0, y, -depth + t))
+            add(bar(t, t, depth), SIMD3(-w / 2 + t, y, -depth / 2))
+            add(bar(t, t, depth), SIMD3(w / 2 - t, y, -depth / 2))
+            y += step
+        }
+        // 側面を一周する、奥行き 10mm ごとの線
+        var z = -step
+        while z > -depth {
+            add(bar(w, t, t), SIMD3(0, t, z))
+            add(bar(w, t, t), SIMD3(0, h - t, z))
+            add(bar(t, h, t), SIMD3(-w / 2 + t, h / 2, z))
+            add(bar(t, h, t), SIMD3(w / 2 - t, h / 2, z))
+            z -= step
+        }
+        checkBoxSize = SIMD2(w, h)
+    }
+
     /// モデルを1回だけ読み、材質を修正してキャッシュする。読めなければ nil（以後も再試行しない）。
     private func loadModelOnce() -> (node: SCNNode, minB: SCNVector3, maxB: SCNVector3)? {
         if let cachedModel { return cachedModel }
@@ -916,6 +988,16 @@ final class HologramRig {
         let hs = baseCharHeight > 0.001 ? (autoH * heightScale) / baseCharHeight : 1
         idleNode.simdScale = SIMD3(hs, hs, hs)
         padNode.simdScale = SIMD3(hs, 1, hs)   // 台座の半径も身長に連動（厚みは変えない）
+
+        // G4 の確認の場面：部屋とキャラを隠して箱だけにする
+        let check = checkMode
+        if worldNode.isHidden != check { worldNode.isHidden = check }
+        if floorFrame.isHidden != check { floorFrame.isHidden = check }
+        if checkBoxNode.isHidden == check { checkBoxNode.isHidden = !check }
+        if check {
+            if checkBoxSize != SIMD2(width, upperH) { rebuildCheckBox() }
+            checkBoxNode.simdPosition = SIMD3(0, foldHalfGap, 0)
+        }
 
         // 上パネル：中心 (0, foldHalfGap + upperH/2, 0)、右 +x、上 +y
         _ = setProjection(camera: upperCamera, eye: eye,

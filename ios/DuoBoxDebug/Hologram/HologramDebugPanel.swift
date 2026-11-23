@@ -115,6 +115,23 @@ final class HologramDiagnostics: ObservableObject {
     /// G3 の計測を実施済みか（未実施の表示に使う）
     @Published var isCalibrated = HologramCalibrationStore.isCalibrated(machineID: HologramDeviceProfile.readMachineID())
     @Published var calibrationResult = HologramCalibrationStore.resultText(machineID: HologramDeviceProfile.readMachineID())
+    /// G4 の箱の確認の答え（未回答は nil）
+    @Published var boxCheck = HologramCalibrationStore.boxCheck(machineID: HologramDeviceProfile.readMachineID())
+
+    /// 調整値を既定に戻す。軸対応・カメラ位置・角度ごとの記録・クレカの棒（実測値）は消さない
+    func resetTunes() {
+        wallRecessMM = 30
+        heightScale = 1
+        pPos = 0.5
+        pAuto = true
+        wAuto = true
+        wLean = 0
+        oeMinCutoff = 1.2
+        oeBeta = 0.8
+        oePredMS = 20
+        showMarkers = false
+        showGrid = true
+    }
 
     /// 手で合わせたカメラ位置を機種IDごとに保存し、すぐ反映する
     func saveManualCamera(belowTopMM: Double, rightMM: Double) {
@@ -142,6 +159,11 @@ struct HologramDebugPanel: View {
     private static let cardLongSideMM: Double = 85.60
     /// 設定をコピーした時刻（「コピーしました」を少しの間出す）
     @State private var copiedAt: Date?
+    @State private var confirmReset = false
+    /// 開発用：カメラ位置の手動入力
+    @State private var devBelowText = ""
+    @State private var devRightText = ""
+    @State private var devCameraError = false
 
     var body: some View {
         ScrollView {
@@ -153,6 +175,8 @@ struct HologramDebugPanel: View {
                 }
                 Button("キャリブレーション", action: onCalibrate)
                     .buttonStyle(.borderedProminent)
+                Button("調整値を既定に戻す") { confirmReset = true }
+                    .font(.caption)
                 rulerSection
                 Divider()
                 deviceSection
@@ -172,8 +196,16 @@ struct HologramDebugPanel: View {
                 chipSection
                 Divider()
                 copySection
+                Divider()
+                developerSection
             }
             .padding(14)
+        }
+        .alert("調整値を既定に戻しますか", isPresented: $confirmReset) {
+            Button("戻す", role: .destructive) { diagnostics.resetTunes() }
+            Button("やめる", role: .cancel) {}
+        } message: {
+            Text("壁の下げ量 30mm、p・w 自動、身長 ×1.0 などに戻します。キャリブレーションの結果、角度ごとの記録、クレカの棒は消えません")
         }
         .foregroundStyle(.white)
         .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
@@ -254,6 +286,8 @@ struct HologramDebugPanel: View {
         if let below = p.occlusionBelowTopMM, let right = p.occlusionRightMM {
             row("occlusion の位置", HologramDeviceProfile.cameraPositionText(belowTopMM: below, rightMM: right))
         }
+        row("軸対応の結果", diagnostics.calibrationResult ?? "キャリブレーション未実施")
+        row("箱の確認", diagnostics.boxCheck.map { $0 ? "はい（奥に止まって見える）" : "いいえ（G2・G3 をやり直す）" } ?? "未回答")
         row("occlusion 生 frame（使用）", p.occlusionFrame.map(frameText) ?? "なし")
         row("occlusion 有効な数", "\(p.occlusionFrames.count)")
         ForEach(Array(p.occlusionFrames.enumerated()), id: \.offset) { i, f in
@@ -416,13 +450,18 @@ struct HologramDebugPanel: View {
                 .font(.caption)
             Slider(value: $diagnostics.oePredMS, in: 0...50, step: 1)
 
-            // 軸対応は固定値。マーカー（⑦）で見て向きが逆なら、ここで直す
-            Divider()
-            Text("軸対応（固定値）").font(.caption.bold())
-            Text("マーカーが頭と逆向きに動くときだけ、下の対応を直す。通常は触らない")
-                .font(.caption2).foregroundStyle(.white.opacity(0.7))
-            let m = tracker.axisMap
-            Text("対応表：シーンX（右）＝ \(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: m.xAxis, sign: m.xSign)])　シーンY（上）＝ \(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: m.yAxis, sign: m.ySign)])（生座標の軸）")
+        }
+    }
+
+    // MARK: 開発用（手動の軸対応とカメラ位置。保存先はキャリブレーションと同じ機種IDごと）
+
+    private var developerSection: some View {
+        let m = tracker.axisMap
+        let p = diagnostics.cameraProfile
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("開発用").font(.subheadline.bold())
+            Text("軸対応（手動）").font(.caption.bold())
+            Text("画面の右＝ \(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: m.xAxis, sign: m.xSign)])　画面の上＝ \(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: m.yAxis, sign: m.ySign)])（画面座標の軸）")
                 .font(.system(.footnote, design: .monospaced))
             HStack {
                 Text("X").font(.caption)
@@ -436,7 +475,47 @@ struct HologramDebugPanel: View {
                     ForEach(0..<6, id: \.self) { Text(HeadTracker.AxisMap.labels[$0]).tag($0) }
                 }.pickerStyle(.segmented)
             }
+            Divider()
+            Text("カメラ位置（手動）").font(.caption.bold())
+            Text(HologramDeviceProfile.cameraPositionText(belowTopMM: p.cameraBelowTopMM, rightMM: p.cameraRightMM))
+                .font(.system(.footnote, design: .monospaced))
+            HStack {
+                TextField("上端から下へ mm", text: $devBelowText)
+                TextField("中央から右へ mm（左は −）", text: $devRightText)
+                Button("数値を保存", action: saveDevCameraText)
+            }
+            .textFieldStyle(.roundedBorder)
+            .keyboardType(.numbersAndPunctuation)
+            .font(.caption)
+            if devCameraError {
+                Text("数値を確認してください（下へは 0 以上）").font(.caption2).foregroundStyle(.red)
+            }
+            CalibrationNudgePad { right, down in
+                let below = Double(devBelowText) ?? p.cameraBelowTopMM
+                let side = Double(devRightText) ?? p.cameraRightMM
+                saveDevCamera(below: max(below + down, 0), right: side + right)
+            }
         }
+        .onAppear {
+            devBelowText = String(format: "%.1f", p.cameraBelowTopMM)
+            devRightText = String(format: "%.1f", p.cameraRightMM)
+        }
+    }
+
+    private func saveDevCameraText() {
+        guard let below = Double(devBelowText), let right = Double(devRightText),
+              below.isFinite, right.isFinite, below >= 0 else {
+            devCameraError = true
+            return
+        }
+        saveDevCamera(below: below, right: right)
+    }
+
+    private func saveDevCamera(below: Double, right: Double) {
+        devCameraError = false
+        devBelowText = String(format: "%.1f", below)
+        devRightText = String(format: "%.1f", right)
+        diagnostics.saveManualCamera(belowTopMM: below, rightMM: right)
     }
 
     // MARK: マーカー（位置合わせ）
@@ -612,6 +691,9 @@ struct HologramDebugPanel: View {
         if camera.cameraSource == .lowerPanel, let c = camera.cameraCenterPt {
             lines.append("読み取った中心（未使用）: x \(num(Double(c.x), 2)) y \(num(Double(c.y), 2)) pt")
         }
+        lines.append("軸対応: x=\(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: tracker.axisMap.xAxis, sign: tracker.axisMap.xSign)]) y=\(HeadTracker.AxisMap.labels[HeadTracker.AxisMap.code(axis: tracker.axisMap.yAxis, sign: tracker.axisMap.ySign)])")
+        lines.append("キャリブレーション: \((d.calibrationResult ?? "未実施").replacingOccurrences(of: "\n", with: "／"))")
+        lines.append("箱の確認: \(d.boxCheck.map { $0 ? "はい" : "いいえ" } ?? "未回答")")
         lines.append("下パネル側の警告: \(camera.cameraSource == .lowerPanel ? "あり" : "なし")")
         let foldY = d.foldY ?? (camera.foldYPt > 0 ? camera.foldYPt : nil)
         let foldNote = d.foldY == nil && foldY != nil ? "（画面中央で代用）" : ""

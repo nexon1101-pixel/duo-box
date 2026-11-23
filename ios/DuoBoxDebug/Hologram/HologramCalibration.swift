@@ -47,6 +47,15 @@ enum HologramCalibrationStore {
         }
     }
 
+    /// G4 の箱の確認の答え（未回答は nil）
+    static func boxCheck(machineID: String) -> Bool? {
+        dictionary(machineID)["boxCheck"] as? Bool
+    }
+
+    static func saveBoxCheck(_ v: Bool, machineID: String) {
+        update(machineID) { $0["boxCheck"] = v }
+    }
+
     /// 映像と点の左右が合わないときの反転
     static func overlayFlip(machineID: String) -> Bool {
         dictionary(machineID)["overlayFlip"] as? Bool ?? false
